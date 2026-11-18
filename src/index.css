@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #050b14;
+    color: #f3ead3;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+}
+
+.font-maritime-serif {
+  font-family: "Playfair Display", "Georgia", "Times New Roman", serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

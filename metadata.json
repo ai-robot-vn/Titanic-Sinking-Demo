@@ -1,0 +1,6 @@
+{
+  "name": "RMS Titanic: Bridge Watch",
+  "description": "Steer the RMS Titanic from its mahogany-and-brass wheelhouse through the moonlit North Atlantic, maneuvering around towering icebergs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
