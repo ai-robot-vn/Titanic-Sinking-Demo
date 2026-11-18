@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ProceduralTextureSet } from './textures';
 
+export const WARSHIP_BREAK_Z = 10.5;
+
 export interface WarshipRescueOptions {
   laddersDeployed: boolean;
   boardedRatio: number;
@@ -14,6 +16,9 @@ export interface WarshipRescueOptions {
 
 export interface WarshipRig {
   root: THREE.Group;
+  hullMeshGroup: THREE.Group;
+  bowGroup: THREE.Group;
+  sternGroup: THREE.Group;
   boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>;
   setNavalState: (
     time: number,
@@ -24,6 +29,8 @@ export interface WarshipRig {
     sweepTargetLocalZ?: number,
     rescueOptions?: WarshipRescueOptions,
   ) => void;
+  setBreakupVisual: (broken: boolean, emberPower?: number) => void;
+  reset: () => void;
   dispose: () => void;
 }
 
@@ -92,7 +99,6 @@ function buildWarshipHull(
       const up = (frac - 0.26) / 0.74;
       widthRatio = 0.9 + up * 0.1 + up * up * flare;
     }
-    // Subtle 1912 Dreadnought ram/plough bow profile
     const bowProjection =
       z <= -70 ? (frac < 0.35 ? -1.45 * (1 - frac / 0.35) : -(frac - 0.35) * 0.75) : 0;
     return [side * beam * widthRatio, y, z + bowProjection, vCoord * 5.5, frac];
@@ -238,25 +244,37 @@ function buildCurvedHouse(
   zMin: number,
   zMax: number,
   height: number,
-  curveLen = 0.55,
+  curveLenFore = 0.55,
+  curveLenAft = curveLenFore,
 ): THREE.BufferGeometry {
   const shape = new THREE.Shape();
   const yFront = -zMin;
   const yBack = -zMax;
-  shape.moveTo(-halfWidth, yFront - curveLen);
-  shape.quadraticCurveTo(-halfWidth, yFront, 0, yFront);
-  shape.quadraticCurveTo(halfWidth, yFront, halfWidth, yFront - curveLen);
-  shape.lineTo(halfWidth, yBack + curveLen);
-  shape.quadraticCurveTo(halfWidth, yBack, 0, yBack);
-  shape.quadraticCurveTo(-halfWidth, yBack, -halfWidth, yBack + curveLen);
+  if (curveLenFore > 0.01) {
+    shape.moveTo(-halfWidth, yFront - curveLenFore);
+    shape.quadraticCurveTo(-halfWidth, yFront, 0, yFront);
+    shape.quadraticCurveTo(halfWidth, yFront, halfWidth, yFront - curveLenFore);
+  } else {
+    shape.moveTo(-halfWidth, yFront);
+    shape.lineTo(halfWidth, yFront);
+  }
+  if (curveLenAft > 0.01) {
+    shape.lineTo(halfWidth, yBack + curveLenAft);
+    shape.quadraticCurveTo(halfWidth, yBack, 0, yBack);
+    shape.quadraticCurveTo(-halfWidth, yBack, -halfWidth, yBack + curveLenAft);
+  } else {
+    shape.lineTo(halfWidth, yBack);
+    shape.lineTo(-halfWidth, yBack);
+  }
   shape.closePath();
 
+  const isSplitFace = curveLenFore <= 0.01 || curveLenAft <= 0.01;
   const geo = new THREE.ExtrudeGeometry(shape, {
     depth: height,
-    bevelEnabled: true,
-    bevelThickness: 0.05,
-    bevelSize: 0.05,
-    bevelSegments: 2,
+    bevelEnabled: !isSplitFace,
+    bevelThickness: isSplitFace ? 0 : 0.05,
+    bevelSize: isSplitFace ? 0 : 0.05,
+    bevelSegments: isSplitFace ? 1 : 2,
     curveSegments: 10,
   });
   geo.rotateX(-Math.PI / 2);
@@ -282,6 +300,23 @@ export function buildWarshipShip(
   isSoftwareGl: boolean,
 ): WarshipRig {
   const root = new THREE.Group();
+  const hullMeshGroup = new THREE.Group();
+  root.add(hullMeshGroup);
+
+  const bowGroup = new THREE.Group();
+  bowGroup.position.set(0, 0, WARSHIP_BREAK_Z);
+  hullMeshGroup.add(bowGroup);
+  const bowContent = new THREE.Group();
+  bowContent.position.set(0, 0, -WARSHIP_BREAK_Z);
+  bowGroup.add(bowContent);
+
+  const sternGroup = new THREE.Group();
+  sternGroup.position.set(0, 0, WARSHIP_BREAK_Z);
+  hullMeshGroup.add(sternGroup);
+  const sternContent = new THREE.Group();
+  sternContent.position.set(0, 0, -WARSHIP_BREAK_Z);
+  sternGroup.add(sternContent);
+
   const geometries: THREE.BufferGeometry[] = [];
   const materials: THREE.Material[] = [];
 
@@ -387,41 +422,83 @@ export function buildWarshipShip(
     }),
   );
   const stayMat = trackMat(new THREE.MeshBasicMaterial({ color: 0x45505e }));
+  const tornSteelMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x2a313a,
+      roughness: 0.72,
+      metalness: 0.65,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const tornRustMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x52281c,
+      roughness: 0.85,
+      metalness: 0.35,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const breakEmberMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xff9f45,
+      emissive: 0xff5a1f,
+      emissiveIntensity: 0,
+      roughness: 0.4,
+      side: THREE.DoubleSide,
+    }),
+  );
 
   // =========================================================================
-  // 1. LOFTED 146 m ADMIRALTY GREY HULL, RED KEEL & FLUSH WEATHER DECKS
+  // 1. LOFTED 146 m ADMIRALTY GREY HULL (SPLIT AT WARSHIP_BREAK_Z) & DECKS
   // =========================================================================
-  const zStations = [
-    -73, -68, -60, -50, -38, -28, -18.2, -18.0, -8, 4, 18, 32, 46, 58, 67, 73,
-  ];
-  const upperHull = new THREE.Mesh(trackGeo(buildWarshipHull(zStations, 7, 0.37, 1.0)), navalGreyMat);
-  upperHull.castShadow = !isSoftwareGl;
-  upperHull.receiveShadow = true;
-  root.add(upperHull);
+  const fwdZ = [-73, -68, -60, -50, -38, -28, -18.2, -18.0, -8, 4, WARSHIP_BREAK_Z];
+  const aftZ = [WARSHIP_BREAK_Z, 18, 32, 46, 58, 67, 73];
+  for (const [stations, targetGrp] of [
+    [fwdZ, bowContent],
+    [aftZ, sternContent],
+  ] as const) {
+    const upperHull = new THREE.Mesh(trackGeo(buildWarshipHull(stations, 7, 0.37, 1.0)), navalGreyMat);
+    upperHull.castShadow = !isSoftwareGl;
+    upperHull.receiveShadow = true;
+    targetGrp.add(upperHull);
 
-  const lowerHull = new THREE.Mesh(trackGeo(buildWarshipHull(zStations, 4, 0.0, 0.38)), antiFoulMat);
-  lowerHull.scale.set(0.999, 1, 0.9995);
-  root.add(lowerHull);
+    const lowerHull = new THREE.Mesh(trackGeo(buildWarshipHull(stations, 4, 0.0, 0.38)), antiFoulMat);
+    lowerHull.scale.set(0.999, 1, 0.9995);
+    targetGrp.add(lowerHull);
+  }
 
   const forecastleDeck = new THREE.Mesh(
     trackGeo(buildWarshipWeatherDeck([-73, -68, -60, -50, -38, -28, -18.0], 0.05, 0.4, -0.02)),
     teakMat,
   );
-  root.add(forecastleDeck);
+  bowContent.add(forecastleDeck);
 
-  const quarterDeck = new THREE.Mesh(
-    trackGeo(buildWarshipWeatherDeck([-18.0, -8, 4, 18, 32, 46, 58, 67, 73], 0.05, 0.4, -0.02)),
+  const quarterDeckBow = new THREE.Mesh(
+    trackGeo(buildWarshipWeatherDeck([-18.0, -8, 4, WARSHIP_BREAK_Z], 0.05, 0.4, -0.02)),
     teakMat,
   );
-  root.add(quarterDeck);
+  bowContent.add(quarterDeckBow);
 
-  // Armored Forecastle Break Bulkhead sealing step between z = -18.2 and -18.0 cleanly
+  const quarterDeckStern = new THREE.Mesh(
+    trackGeo(buildWarshipWeatherDeck([WARSHIP_BREAK_Z, 18, 32, 46, 58, 67, 73], 0.05, 0.4, -0.02)),
+    teakMat,
+  );
+  sternContent.add(quarterDeckStern);
+
   const breakBulkhead = new THREE.Mesh(trackGeo(buildCurvedHouse(11.3, -18.5, -17.6, 2.0, 0.18)), navalGreyMat);
   breakBulkhead.position.y = 4.95;
-  root.add(breakBulkhead);
+  bowContent.add(breakBulkhead);
 
   // Hull-conforming Perimeter Deck Railings
-  const addRailSeg = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => {
+  const addRailSeg = (
+    targetGrp: THREE.Group,
+    x1: number,
+    y1: number,
+    z1: number,
+    x2: number,
+    y2: number,
+    z2: number,
+  ) => {
     const dx = x2 - x1;
     const dy = y2 - y1;
     const dz = z2 - z1;
@@ -434,10 +511,10 @@ export function buildWarshipShip(
       bar.position.set((x1 + x2) * 0.5, (y1 + y2) * 0.5 + off, (z1 + z2) * 0.5);
       bar.rotation.x = Math.PI / 2;
       bar.rotation.z = -Math.atan2(dx, dz);
-      root.add(bar);
+      targetGrp.add(bar);
     }
   };
-  const addHullRail = (zList: number[]) => {
+  const addHullRail = (targetGrp: THREE.Group, zList: number[]) => {
     for (const side of [-1, 1] as const) {
       for (let i = 0; i < zList.length; i++) {
         const z = zList[i];
@@ -446,12 +523,13 @@ export function buildWarshipShip(
         const ry = sheerY + 0.05;
         const post = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.04, 0.04, 0.98, 6)), armorDarkGreyMat);
         post.position.set(rx, ry + 0.49, z <= -70 ? z - 0.45 : z);
-        root.add(post);
+        targetGrp.add(post);
         if (i < zList.length - 1) {
           const nz = zList[i + 1];
           const nxSt = sampleWarshipStation(nz);
           const nrx = side * Math.max(0, nxSt.beam * (1 + nxSt.flare) - 0.18);
           addRailSeg(
+            targetGrp,
             rx,
             ry,
             z <= -70 ? z - 0.45 : z,
@@ -463,98 +541,117 @@ export function buildWarshipShip(
       }
     }
   };
-  addHullRail([-72.5, -62, -50, -36, -24, -18.3]);
-  addHullRail([-17.6, -6, 8, 22, 36, 50, 62, 72.2]);
+  addHullRail(bowContent, [-72.5, -62, -50, -36, -24, -18.3]);
+  addHullRail(bowContent, [-17.6, -6, 8, WARSHIP_BREAK_Z]);
+  addHullRail(sternContent, [WARSHIP_BREAK_Z, 22, 36, 50, 62, 72.2]);
 
   // Bower Anchors & Forecastle Anchor Capstans
   for (const side of [-1, 1] as const) {
     const anchor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.45, 1.85, 1.2)), gunmetalMat);
     anchor.position.set(side * 4.5, 6.2, -62.5);
     anchor.rotation.z = side * 0.25;
-    root.add(anchor);
+    bowContent.add(anchor);
 
     const capstan = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.62, 0.78, 0.95, 12)), gunmetalMat);
     capstan.position.set(side * 2.1, 8.2, -57.5);
-    root.add(capstan);
+    bowContent.add(capstan);
   }
 
   // =========================================================================
   // 2. ARMORED SUPERSTRUCTURE, CONNING TOWER, COMPASS BRIDGE & SEARCHLIGHT
   // =========================================================================
-  // Armored Citadel Casemate Deckhouse (z = -34 .. +28)
-  const lowerCitadel = new THREE.Mesh(trackGeo(buildCurvedHouse(6.6, -33.0, 26.5, 2.75, 0.85)), navalGreyMat);
-  lowerCitadel.position.y = 5.05;
-  lowerCitadel.castShadow = !isSoftwareGl;
-  root.add(lowerCitadel);
+  const lowerCitadelBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(6.6, -33.0, WARSHIP_BREAK_Z, 2.75, 0.85, 0)),
+    navalGreyMat,
+  );
+  lowerCitadelBow.position.y = 5.05;
+  lowerCitadelBow.castShadow = !isSoftwareGl;
+  bowContent.add(lowerCitadelBow);
 
-  const citadelDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(6.8, -33.3, 26.8, 0.24, 0.85)), teakMat);
-  citadelDeck.position.y = 7.8;
-  root.add(citadelDeck);
+  const lowerCitadelStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(6.6, WARSHIP_BREAK_Z, 26.5, 2.75, 0, 0.85)),
+    navalGreyMat,
+  );
+  lowerCitadelStern.position.y = 5.05;
+  lowerCitadelStern.castShadow = !isSoftwareGl;
+  sternContent.add(lowerCitadelStern);
 
-  // Forward Superstructure Tier & Armored Conning Tower
+  const citadelDeckBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(6.8, -33.3, WARSHIP_BREAK_Z, 0.24, 0.85, 0)),
+    teakMat,
+  );
+  citadelDeckBow.position.y = 7.8;
+  bowContent.add(citadelDeckBow);
+
+  const citadelDeckStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(6.8, WARSHIP_BREAK_Z, 26.8, 0.24, 0, 0.85)),
+    teakMat,
+  );
+  citadelDeckStern.position.y = 7.8;
+  sternContent.add(citadelDeckStern);
+
+  // Forward Superstructure Tier & Armored Conning Tower (all in bowContent)
   const fwdSuper = new THREE.Mesh(trackGeo(buildCurvedHouse(4.9, -30.5, -14.0, 2.55, 0.65)), navalGreyMat);
   fwdSuper.position.y = 7.98;
   fwdSuper.castShadow = !isSoftwareGl;
-  root.add(fwdSuper);
+  bowContent.add(fwdSuper);
 
   const fwdSuperRoof = new THREE.Mesh(trackGeo(buildCurvedHouse(5.15, -30.8, -13.8, 0.22, 0.65)), teakMat);
   fwdSuperRoof.position.y = 10.52;
-  root.add(fwdSuperRoof);
+  bowContent.add(fwdSuperRoof);
 
-  // Thick Cylindrical Armored Conning Tower directly in front of chart house
   const conningTower = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(2.15, 2.35, 2.5, 18)), armorDarkGreyMat);
   conningTower.position.set(0, 11.75, -28.6);
-  root.add(conningTower);
+  bowContent.add(conningTower);
   const conningCap = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(1.75, 2.25, 0.58, 18)), armorDarkGreyMat);
   conningCap.position.set(0, 13.25, -28.6);
-  root.add(conningCap);
+  bowContent.add(conningCap);
 
-  // Captain's & Admiral's Compass Bridge Wings spanning ±11.2m
   const bridgeWingDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(11.1, -27.2, -23.4, 0.26, 0.25)), teakMat);
   bridgeWingDeck.position.y = 13.1;
-  root.add(bridgeWingDeck);
+  bowContent.add(bridgeWingDeck);
 
   for (const sx of [-8.8, -5.6, 5.6, 8.8]) {
     const pillar = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.11, 0.14, 5.3, 8)), navalGreyMat);
     pillar.position.set(sx, 10.45, -25.2);
-    root.add(pillar);
+    bowContent.add(pillar);
   }
 
   const chartHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(3.8, -26.8, -21.2, 2.25, 0.35)), navalGreyMat);
   chartHouse.position.y = 13.34;
-  root.add(chartHouse);
+  bowContent.add(chartHouse);
 
   const chartRoof = new THREE.Mesh(trackGeo(buildCurvedHouse(4.0, -27.0, -21.0, 0.2, 0.35)), teakMat);
   chartRoof.position.y = 15.58;
-  root.add(chartRoof);
+  bowContent.add(chartRoof);
 
   const bridgeWindows = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.2, 0.56, 0.14)), warmGlowMat);
   bridgeWindows.position.set(0, 14.52, -26.85);
-  root.add(bridgeWindows);
+  bowContent.add(bridgeWindows);
 
   for (const side of [-1, 1] as const) {
     const wingWall = new THREE.Mesh(trackGeo(buildCurvedHouse(3.6, -27.15, -26.75, 1.05, 0.1)), navalGreyMat);
     wingWall.position.set(side * 7.4, 13.35, 0);
-    root.add(wingWall);
+    bowContent.add(wingWall);
 
-    addRailSeg(side * 3.8, 13.36, -23.5, side * 11.0, 13.36, -23.5);
+    addRailSeg(bowContent, side * 3.8, 13.36, -23.5, side * 11.0, 13.36, -23.5);
 
     const wingCab = new THREE.Mesh(trackGeo(buildCurvedHouse(0.45, -27.1, -23.5, 1.12, 0.12)), navalGreyMat);
     wingCab.position.set(side * 10.8, 13.35, 0);
-    root.add(wingCab);
+    bowContent.add(wingCab);
 
     const nav = new THREE.Mesh(
       trackGeo(new THREE.SphereGeometry(0.22, 10, 10)),
       side < 0 ? portRedMat : stbdGreenMat,
     );
     nav.position.set(side * 10.95, 14.62, -25.6);
-    root.add(nav);
+    bowContent.add(nav);
   }
 
   // Naval Searchlight Projector & Sweeping SpotLight atop Compass Bridge Roof
   const slPedestal = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.16, 0.24, 0.42, 10)), brassMat);
   slPedestal.position.set(0, 15.88, -25.4);
-  root.add(slPedestal);
+  bowContent.add(slPedestal);
 
   const slDrum = new THREE.Group();
   slDrum.position.set(0, 16.32, -25.4);
@@ -565,16 +662,16 @@ export function buildWarshipShip(
   slLens.rotation.y = Math.PI;
   slLens.position.z = -0.42;
   slDrum.add(slLens);
-  root.add(slDrum);
+  bowContent.add(slDrum);
 
   const navalSpotTarget = new THREE.Object3D();
   navalSpotTarget.position.set(0, 1.5, -145);
-  root.add(navalSpotTarget);
+  bowContent.add(navalSpotTarget);
 
   const navalSpotLight = new THREE.SpotLight(0xeef7ff, 12, 340, Math.PI / 10, 0.55, 1.1);
   navalSpotLight.position.set(0, 16.32, -25.8);
   navalSpotLight.target = navalSpotTarget;
-  root.add(navalSpotLight);
+  bowContent.add(navalSpotLight);
 
   // =========================================================================
   // 3. FOUR TWIN 12-INCH MAIN TURRETS (A, P, Q, Y) + SECONDARY CASEMATE GUNS
@@ -594,12 +691,10 @@ export function buildWarshipShip(
     const turretGrp = new THREE.Group();
     turretGrp.rotation.y = defaultYaw;
 
-    // Armored cylindrical barbette foundation
     const barbette = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(3.4, 3.65, 1.35, 20)), armorDarkGreyMat);
     barbette.position.y = 0.42;
     turretGrp.add(barbette);
 
-    // Beveled octagonal/curved turret gunhouse
     const tShape = new THREE.Shape();
     tShape.moveTo(-2.7, -2.9);
     tShape.lineTo(2.7, -2.9);
@@ -624,12 +719,10 @@ export function buildWarshipShip(
     hood.castShadow = !isSoftwareGl;
     turretGrp.add(hood);
 
-    // Armored Rangefinder & Officer's Sighting Hood atop turret
     const rfBox = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.6, 0.5, 1.1)), navalGreyMat);
     rfBox.position.set(0, 3.15, 0.9);
     turretGrp.add(rfBox);
 
-    // Twin 12-inch Mark X Tapered Gun Barrels + Blast Mantlets + Muzzle Flashes
     const barrelGeo = trackGeo(new THREE.CylinderGeometry(0.18, 0.34, 8.6, 12));
     barrelGeo.rotateX(Math.PI / 2);
     const mantletGeo = trackGeo(new THREE.BoxGeometry(0.95, 0.85, 0.85));
@@ -642,7 +735,7 @@ export function buildWarshipShip(
 
       const barrel = new THREE.Mesh(barrelGeo, gunmetalMat);
       barrel.position.set(bx, 2.16, -6.95);
-      barrel.rotation.x = 0.065; // Slight naval elevation
+      barrel.rotation.x = 0.065;
       barrel.castShadow = !isSoftwareGl;
       turretGrp.add(barrel);
 
@@ -657,57 +750,64 @@ export function buildWarshipShip(
     return { group: turretGrp, defaultYaw, flashes };
   };
 
-  // 'A' Forward Main Turret on Forecastle
   const turretA = buildTwinTurret(0);
   turretA.group.position.set(0, 7.25, -45.5);
-  root.add(turretA.group);
+  bowContent.add(turretA.group);
 
-  // 'P' & 'Q' Midships Wing Turrets on Port & Starboard Sponsons
   const turretP = buildTwinTurret(Math.PI * 0.16);
   turretP.group.position.set(-7.6, 5.15, 3.5);
-  root.add(turretP.group);
+  bowContent.add(turretP.group);
 
   const turretQ = buildTwinTurret(-Math.PI * 0.16);
   turretQ.group.position.set(7.6, 5.15, 3.5);
-  root.add(turretQ.group);
+  bowContent.add(turretQ.group);
 
-  // 'Y' Aft Main Turret on Quarterdeck facing astern
   const turretY = buildTwinTurret(Math.PI);
   turretY.group.position.set(0, 5.08, 49.0);
-  root.add(turretY.group);
+  sternContent.add(turretY.group);
 
-  // Wing Sponson Casings beneath P & Q turrets so nothing overhangs awkwardly
   for (const side of [-1, 1] as const) {
     const sponson = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(3.75, 3.2, 2.2, 16)), navalGreyMat);
     sponson.position.set(side * 7.6, 4.15, 3.5);
-    root.add(sponson);
+    bowContent.add(sponson);
   }
 
-  // Secondary 4-inch Anti-Torpedo-Boat Casemate Guns along superstructure
   const secBarrelGeo = trackGeo(new THREE.CylinderGeometry(0.08, 0.13, 3.2, 8));
   secBarrelGeo.rotateZ(Math.PI / 2);
   for (const side of [-1, 1] as const) {
     for (const gz of [-26, -10, 20]) {
+      const targetGrp = gz <= WARSHIP_BREAK_Z ? bowContent : sternContent;
       const shield = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.55, 0.6, 0.85, 8)), armorDarkGreyMat);
       shield.position.set(side * 6.4, 8.22, gz);
-      root.add(shield);
+      targetGrp.add(shield);
 
       const gun = new THREE.Mesh(secBarrelGeo, gunmetalMat);
       gun.position.set(side * 7.75, 8.32, gz);
-      root.add(gun);
+      targetGrp.add(gun);
     }
   }
 
   // =========================================================================
   // 4. THREE ROYAL NAVY FUNNELS + TWO TRIPOD FIGHTING MASTS + WHITE ENSIGN
   // =========================================================================
-  const fidleyCasing = new THREE.Mesh(trackGeo(buildCurvedHouse(2.7, -14.5, 22.8, 1.1, 0.5)), armorDarkGreyMat);
-  fidleyCasing.position.y = 7.9;
-  root.add(fidleyCasing);
+  const fidleyBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(2.7, -14.5, WARSHIP_BREAK_Z, 1.1, 0.5, 0)),
+    armorDarkGreyMat,
+  );
+  fidleyBow.position.y = 7.9;
+  bowContent.add(fidleyBow);
+
+  const fidleyStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(2.7, WARSHIP_BREAK_Z, 22.8, 1.1, 0, 0.5)),
+    armorDarkGreyMat,
+  );
+  fidleyStern.position.y = 7.9;
+  sternContent.add(fidleyStern);
 
   const funnelZList = [-10.5, 4.5, 19.5];
   for (let f = 0; f < funnelZList.length; f++) {
     const fz = funnelZList[f];
+    const targetGrp = fz <= WARSHIP_BREAK_Z ? bowContent : sternContent;
     const fGrp = new THREE.Group();
     fGrp.position.set(0, 8.85, fz);
     fGrp.rotation.x = 0.04;
@@ -736,7 +836,7 @@ export function buildWarshipShip(
     steamPipe.position.set(0, 5.4, -1.96);
     fGrp.add(steamPipe);
 
-    root.add(fGrp);
+    targetGrp.add(fGrp);
 
     for (const [tx, bx, bz] of [
       [-1.4, -6.3, fz - 2.6],
@@ -756,17 +856,18 @@ export function buildWarshipShip(
         ),
         stayMat,
       );
-      root.add(guy);
+      targetGrp.add(guy);
     }
   }
 
-  // Twin Heavy Tripod Fighting Masts (Foremast z = -22.5, Mainmast z = 31.0)
+  // Twin Heavy Tripod Fighting Masts (Foremast z = -20.5 -> bow, Mainmast z = 31.0 -> stern)
   const mastConfigs = [
-    { z: -20.5, baseY: 10.6, topY: 32.5, spotY: 23.8, isFore: true },
-    { z: 31.0, baseY: 5.1, topY: 30.5, spotY: 21.8, isFore: false },
+    { z: -20.5, baseY: 10.6, topY: 32.5, spotY: 23.8 },
+    { z: 31.0, baseY: 5.1, topY: 30.5, spotY: 21.8 },
   ];
   const mastTops: THREE.Vector3[] = [];
   for (const mc of mastConfigs) {
+    const targetGrp = mc.z <= WARSHIP_BREAK_Z ? bowContent : sternContent;
     const mastH = mc.topY - mc.baseY;
     const pole = new THREE.Mesh(
       trackGeo(new THREE.CylinderGeometry(0.16, 0.36, mastH, 12)),
@@ -774,37 +875,34 @@ export function buildWarshipShip(
     );
     pole.position.set(0, mc.baseY + mastH * 0.5, mc.z);
     pole.castShadow = !isSoftwareGl;
-    root.add(pole);
+    targetGrp.add(pole);
 
-    // Two angled tripod legs supporting the Spotting Top seamlessly from deck
     for (const sx of [-1, 1] as const) {
       const legCurve = new THREE.LineCurve3(
         new THREE.Vector3(sx * 3.4, mc.baseY - 0.1, mc.z + 4.8),
         new THREE.Vector3(sx * 0.26, mc.spotY - 0.4, mc.z),
       );
       const leg = new THREE.Mesh(trackGeo(new THREE.TubeGeometry(legCurve, 4, 0.18, 8, false)), mastBuffMat);
-      root.add(leg);
+      targetGrp.add(leg);
     }
 
-    // Armored Fire-Control Spotting Top Platform
     const spotPlatform = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(1.55, 1.25, 1.15, 12)), armorDarkGreyMat);
     spotPlatform.position.set(0, mc.spotY, mc.z);
-    root.add(spotPlatform);
+    targetGrp.add(spotPlatform);
 
-    // Yardarms + White Masthead Steaming Light
     const yard = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.06, 0.09, 9.2, 8)), mastBuffMat);
     yard.rotation.z = Math.PI / 2;
     yard.position.set(0, mc.topY - 5.2, mc.z);
-    root.add(yard);
+    targetGrp.add(yard);
 
     const mastLamp = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.22, 8, 8)), warmGlowMat);
     mastLamp.position.set(0, mc.topY - 6.8, mc.z - 0.28);
-    root.add(mastLamp);
+    targetGrp.add(mastLamp);
 
     mastTops.push(new THREE.Vector3(0, mc.topY - 0.3, mc.z));
   }
 
-  // Wireless Aerial Wires strung between Foremast & Mainmast
+  const aerialsGroup = new THREE.Group();
   for (const ax of [-0.4, 0.4]) {
     const aerial = new THREE.Mesh(
       trackGeo(
@@ -821,8 +919,9 @@ export function buildWarshipShip(
       ),
       stayMat,
     );
-    root.add(aerial);
+    aerialsGroup.add(aerial);
   }
+  bowContent.add(aerialsGroup);
 
   // Stern Royal Navy White Ensign Flag
   const ensignGroup = new THREE.Group();
@@ -844,32 +943,109 @@ export function buildWarshipShip(
   ensignFlag.position.set(0.02, 4.5, 1.6);
   ensignFlag.rotation.y = Math.PI / 2;
   ensignGroup.add(ensignFlag);
-  root.add(ensignGroup);
+  sternContent.add(ensignGroup);
 
   // Stowed Naval Steam Pinnaces / Cutters on Citadel Boat Deck
   const boatHullGeo = trackGeo(buildCurvedHouse(0.82, -2.5, 2.5, 0.62, 0.85));
   for (const side of [-1, 1] as const) {
     for (const bz of [-4, 14]) {
+      const targetGrp = bz <= WARSHIP_BREAK_Z ? bowContent : sternContent;
       const chock = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.1, 0.4, 3.2)), teakMat);
       chock.position.set(side * 5.2, 8.15, bz);
-      root.add(chock);
+      targetGrp.add(chock);
       const boat = new THREE.Mesh(boatHullGeo, creamBoatMat);
       boat.position.set(side * 5.2, 8.35, bz);
-      root.add(boat);
+      targetGrp.add(boat);
     }
   }
 
   // =========================================================================
-  // 5. HULL & CITADEL PORTHOLES + 24 ROYAL NAVY CREWMEN (InstancedMesh)
+  // 4B. JAGGED INTERNAL FRACTURE BULKHEADS AT z = WARSHIP_BREAK_Z
+  // =========================================================================
+  const buildFractureBulkhead = (dirZ: -1 | 1): THREE.Group => {
+    const cap = new THREE.Group();
+    cap.position.set(0, 0, WARSHIP_BREAK_Z);
+
+    const { beam, sheerY } = sampleWarshipStation(WARSHIP_BREAK_Z);
+    const hullFaceShape = new THREE.Shape();
+    hullFaceShape.moveTo(0, -4.8);
+    hullFaceShape.quadraticCurveTo(beam * 0.86, -3.2, beam * 0.98, 0.9);
+    hullFaceShape.lineTo(beam * 1.02, sheerY);
+    hullFaceShape.lineTo(6.6, sheerY);
+    hullFaceShape.lineTo(6.6, 7.8);
+    hullFaceShape.lineTo(2.7, 7.8);
+    hullFaceShape.lineTo(2.7, 9.0);
+    hullFaceShape.lineTo(-2.7, 9.0);
+    hullFaceShape.lineTo(-2.7, 7.8);
+    hullFaceShape.lineTo(-6.6, 7.8);
+    hullFaceShape.lineTo(-6.6, sheerY);
+    hullFaceShape.lineTo(-beam * 1.02, sheerY);
+    hullFaceShape.lineTo(-beam * 0.98, 0.9);
+    hullFaceShape.quadraticCurveTo(-beam * 0.86, -3.2, 0, -4.8);
+    hullFaceShape.closePath();
+
+    const plate = new THREE.Mesh(trackGeo(new THREE.ShapeGeometry(hullFaceShape)), tornSteelMat);
+    plate.position.z = -dirZ * 0.08;
+    cap.add(plate);
+
+    for (const dy of [-2.2, 0.8, 3.1, 5.1, 7.85]) {
+      const w = dy < 5.5 ? 21.6 : 13.0;
+      const slab = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(w, 0.24, 0.95)), tornRustMat);
+      slab.position.set(0, dy, dirZ * 0.2);
+      cap.add(slab);
+    }
+
+    for (let ji = 0; ji < 13; ji++) {
+      const xPos = -10.2 + ji * 1.7;
+      const yPos = -3.4 + ((ji * 5) % 10) * 1.1;
+      const jutLen = 0.55 + ((ji * 11) % 6) * 0.24;
+      const shard = new THREE.Mesh(
+        trackGeo(new THREE.ConeGeometry(0.36 + (ji % 3) * 0.14, jutLen, 4)),
+        ji % 2 === 0 ? tornSteelMat : tornRustMat,
+      );
+      shard.rotation.x = dirZ * (Math.PI / 2 + ((ji % 5) - 2) * 0.14);
+      shard.rotation.z = ((ji % 4) - 1.5) * 0.22;
+      shard.position.set(xPos, yPos, dirZ * (jutLen * 0.45 + 0.1));
+      cap.add(shard);
+    }
+
+    for (const [ex, ey] of [
+      [-4.2, 1.8],
+      [4.2, 1.8],
+      [-3.0, 6.2],
+      [3.0, 6.2],
+    ]) {
+      const ember = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(2.6, 1.2)), breakEmberMat);
+      ember.position.set(ex, ey, dirZ * 0.24);
+      if (dirZ < 0) ember.rotation.y = Math.PI;
+      cap.add(ember);
+    }
+
+    cap.visible = false;
+    return cap;
+  };
+
+  const bowBreakCap = buildFractureBulkhead(1);
+  bowContent.add(bowBreakCap);
+  const sternBreakCap = buildFractureBulkhead(-1);
+  sternContent.add(sternBreakCap);
+
+  // =========================================================================
+  // 5. HULL & CITADEL PORTHOLES + 24 ROYAL NAVY CREWMEN (SPLIT BOW & STERN)
   // =========================================================================
   const portholeGeo = trackGeo(new THREE.CircleGeometry(0.2, 10));
-  const phCoords: Array<{ x: number; y: number; z: number; ry: number }> = [];
+  const phBow: Array<{ x: number; y: number; z: number; ry: number }> = [];
+  const phStern: Array<{ x: number; y: number; z: number; ry: number }> = [];
+  const pushPh = (p: { x: number; y: number; z: number; ry: number }) => {
+    if (p.z <= WARSHIP_BREAK_Z) phBow.push(p);
+    else phStern.push(p);
+  };
   for (const side of [-1, 1]) {
     for (let z = -54; z <= 62; z += 5.2) {
       const { beam, sheerY } = sampleWarshipStation(z);
       const { beam: beamNext } = sampleWarshipStation(z + 1.5);
       const slopeAngle = Math.atan2((beamNext - beam) * side, 1.5);
-      phCoords.push({
+      pushPh({
         x: side * (beam * 0.99 + 0.05),
         y: sheerY - 1.35,
         z,
@@ -877,7 +1053,7 @@ export function buildWarshipShip(
       });
     }
     for (let z = -29; z <= 22; z += 4.2) {
-      phCoords.push({
+      pushPh({
         x: side * 6.66,
         y: 6.45,
         z,
@@ -885,20 +1061,26 @@ export function buildWarshipShip(
       });
     }
   }
-  const phInst = new THREE.InstancedMesh(portholeGeo, warmGlowMat, phCoords.length);
   const dummy = new THREE.Object3D();
-  for (let i = 0; i < phCoords.length; i++) {
-    const p = phCoords[i];
-    dummy.position.set(p.x, p.y, p.z);
-    dummy.rotation.set(0, p.ry, 0);
-    dummy.scale.set(1, 1, 1);
-    dummy.updateMatrix();
-    phInst.setMatrixAt(i, dummy.matrix);
+  for (const [list, targetGrp] of [
+    [phBow, bowContent],
+    [phStern, sternContent],
+  ] as const) {
+    if (list.length === 0) continue;
+    const phInst = new THREE.InstancedMesh(portholeGeo, warmGlowMat, list.length);
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      dummy.position.set(p.x, p.y, p.z);
+      dummy.rotation.set(0, p.ry, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      phInst.setMatrixAt(i, dummy.matrix);
+    }
+    phInst.instanceMatrix.needsUpdate = true;
+    targetGrp.add(phInst);
   }
-  phInst.instanceMatrix.needsUpdate = true;
-  root.add(phInst);
 
-  // 24 Royal Navy Officers & Seamen on Compass Bridge, Forecastle, Spotting Top & Quarterdeck
+  // 24 Royal Navy Officers & Seamen split cleanly across bow & stern halves
   const personTorso = trackGeo(new THREE.CylinderGeometry(0.16, 0.14, 0.68, 8));
   personTorso.translate(0, 1.08, 0);
   const personLegs = trackGeo(new THREE.CylinderGeometry(0.12, 0.1, 0.78, 8));
@@ -916,7 +1098,7 @@ export function buildWarshipShip(
   const skinMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xe6bca0, roughness: 0.68 }));
   const capWhiteMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xf4f4f0, roughness: 0.55 }));
 
-  const crewSpots: Array<[number, number, number, number]> = [
+  const allCrewSpots: Array<[number, number, number, number]> = [
     [-8.5, 13.36, -25.4, 0.15],
     [-6.2, 13.36, -25.6, 0],
     [6.2, 13.36, -25.6, 0],
@@ -943,32 +1125,47 @@ export function buildWarshipShip(
     [4.2, 8.05, -22.0, Math.PI / 2],
   ];
 
-  const crewBodyInst = new THREE.InstancedMesh(crewBodyGeo, navyUniformMat, crewSpots.length);
-  const crewHeadInst = new THREE.InstancedMesh(crewHeadGeo, skinMat, crewSpots.length);
-  const crewCapInst = new THREE.InstancedMesh(crewCapGeo, capWhiteMat, crewSpots.length);
-  crewBodyInst.frustumCulled = false;
-  crewHeadInst.frustumCulled = false;
-  crewCapInst.frustumCulled = false;
-  root.add(crewBodyInst);
-  root.add(crewHeadInst);
-  root.add(crewCapInst);
+  const bowCrewSpots = allCrewSpots.filter((c) => c[2] <= WARSHIP_BREAK_Z);
+  const sternCrewSpots = allCrewSpots.filter((c) => c[2] > WARSHIP_BREAK_Z);
+
+  const bowCrewBodyInst = new THREE.InstancedMesh(crewBodyGeo, navyUniformMat, bowCrewSpots.length);
+  const bowCrewHeadInst = new THREE.InstancedMesh(crewHeadGeo, skinMat, bowCrewSpots.length);
+  const bowCrewCapInst = new THREE.InstancedMesh(crewCapGeo, capWhiteMat, bowCrewSpots.length);
+  const sternCrewBodyInst = new THREE.InstancedMesh(crewBodyGeo, navyUniformMat, sternCrewSpots.length);
+  const sternCrewHeadInst = new THREE.InstancedMesh(crewHeadGeo, skinMat, sternCrewSpots.length);
+  const sternCrewCapInst = new THREE.InstancedMesh(crewCapGeo, capWhiteMat, sternCrewSpots.length);
+
+  for (const inst of [
+    bowCrewBodyInst,
+    bowCrewHeadInst,
+    bowCrewCapInst,
+    sternCrewBodyInst,
+    sternCrewHeadInst,
+    sternCrewCapInst,
+  ]) {
+    inst.frustumCulled = false;
+  }
+  bowContent.add(bowCrewBodyInst, bowCrewHeadInst, bowCrewCapInst);
+  sternContent.add(sternCrewBodyInst, sternCrewHeadInst, sternCrewCapInst);
 
   // =========================================================================
   // 6. RESCUE BOARDING LADDERS, FLOODLIGHT & SURVIVORS IN CORK LIFEJACKETS
   // =========================================================================
   const rescueDeckLight = new THREE.PointLight(0xffcb80, 0, 110, 1.3);
   rescueDeckLight.position.set(0, 13.5, 22);
-  root.add(rescueDeckLight);
+  sternContent.add(rescueDeckLight);
 
   const boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }> = [
-    { x: -12.6, y: 0.4, z: 10.0, side: -1 },
+    { x: -12.6, y: 0.4, z: 9.0, side: -1 },
     { x: -12.6, y: 0.4, z: 34.0, side: -1 },
-    { x: 12.6, y: 0.4, z: 10.0, side: 1 },
+    { x: 12.6, y: 0.4, z: 9.0, side: 1 },
     { x: 12.6, y: 0.4, z: 34.0, side: 1 },
   ];
 
-  const laddersGroup = new THREE.Group();
-  laddersGroup.visible = false;
+  const bowLaddersGroup = new THREE.Group();
+  const sternLaddersGroup = new THREE.Group();
+  bowLaddersGroup.visible = false;
+  sternLaddersGroup.visible = false;
   const ropeRailGeo = trackGeo(new THREE.CylinderGeometry(0.035, 0.035, 5.6, 6));
   const rungGeo = trackGeo(new THREE.BoxGeometry(0.18, 0.06, 0.95));
   const stageGeo = trackGeo(new THREE.BoxGeometry(1.15, 0.14, 1.65));
@@ -979,7 +1176,6 @@ export function buildWarshipShip(
     const g = new THREE.Group();
     g.position.set(st.side * 11.75, 2.85, st.z);
 
-    // Upper quarterdeck landing bridge spanning from hull deck edge to ladder top
     const upperLanding = new THREE.Mesh(upperLandingGeo, teakMat);
     upperLanding.position.set(-st.side * 0.45, 2.32, 0);
     g.add(upperLanding);
@@ -1002,11 +1198,11 @@ export function buildWarshipShip(
     lamp.position.set(st.side * 0.58, -1.45, 0.65);
     g.add(lamp);
 
-    laddersGroup.add(g);
+    (st.z <= WARSHIP_BREAK_Z ? bowLaddersGroup : sternLaddersGroup).add(g);
   }
-  root.add(laddersGroup);
+  bowContent.add(bowLaddersGroup);
+  sternContent.add(sternLaddersGroup);
 
-  // 96 Rescued Titanic Passengers in Cork Lifejackets boarding & lining warship decks
   const corkVest = trackGeo(new THREE.CylinderGeometry(0.2, 0.19, 0.38, 10));
   corkVest.translate(0, 1.15, 0);
   const survBodyGeo = trackGeo(normalizeAndMerge([personLegs, personTorso]));
@@ -1017,74 +1213,95 @@ export function buildWarshipShip(
   const survVestMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xefe3c8, roughness: 0.85 }));
 
   const MAX_SURVIVOR_FIGURES = 96;
-  const survivorSpots: Array<{
+  interface WarshipSurvSpot {
     x: number;
     y: number;
     z: number;
     ry: number;
     phase: number;
     onLadder?: number;
-  }> = [];
+    orderIdx: number;
+  }
+  const bowSurvSpots: WarshipSurvSpot[] = [];
+  const sternSurvSpots: WarshipSurvSpot[] = [];
 
   for (let i = 0; i < MAX_SURVIVOR_FIGURES; i++) {
     const isClimbing = i % 12 === 0;
     const side: -1 | 1 = i % 2 === 0 ? -1 : 1;
+    let spotBase: { x: number; y: number; z: number; ry: number; phase: number; onLadder?: number };
     if (isClimbing) {
       const st = boardingStationsLocal[i % boardingStationsLocal.length];
-      survivorSpots.push({
+      spotBase = {
         x: st.side * 12.0,
         y: 1.0 + ((i * 5) % 4) * 0.9,
         z: st.z + ((i % 3) - 1) * 0.24,
         ry: st.side > 0 ? Math.PI / 2 : -Math.PI / 2,
         phase: i * 0.9,
         onLadder: i % boardingStationsLocal.length,
-      });
+      };
     } else if (i % 4 === 0) {
-      // Upper Citadel Boat Deck (y = 8.04)
-      survivorSpots.push({
+      spotBase = {
         x: side * (3.6 + ((i * 7) % 18) * 0.12),
         y: 8.04,
         z: -10 + ((i * 13) % 34),
         ry: side > 0 ? -Math.PI / 2 : Math.PI / 2,
         phase: i * 1.2,
-      });
+      };
     } else {
-      // Main Waist & Quarterdeck (y = 5.15) clear of Wing & Y turrets
       const zSlot = 8 + ((i * 11) % 34);
-      survivorSpots.push({
+      spotBase = {
         x: side * (7.2 + ((i * 13) % 28) * 0.11),
         y: 5.15,
         z: zSlot,
         ry: side > 0 ? -Math.PI / 2 : Math.PI / 2,
         phase: i * 1.05,
-      });
+      };
     }
+    (spotBase.z <= WARSHIP_BREAK_Z ? bowSurvSpots : sternSurvSpots).push({
+      ...spotBase,
+      orderIdx: i,
+    });
   }
 
-  const survBodyInst = new THREE.InstancedMesh(survBodyGeo, survBodyMat, MAX_SURVIVOR_FIGURES);
-  const survHeadInst = new THREE.InstancedMesh(survHeadGeo, skinMat, MAX_SURVIVOR_FIGURES);
-  const survVestInst = new THREE.InstancedMesh(survVestGeo, survVestMat, MAX_SURVIVOR_FIGURES);
-  survBodyInst.frustumCulled = false;
-  survHeadInst.frustumCulled = false;
-  survVestInst.frustumCulled = false;
+  const bowSurvBodyInst = new THREE.InstancedMesh(survBodyGeo, survBodyMat, bowSurvSpots.length);
+  const bowSurvHeadInst = new THREE.InstancedMesh(survHeadGeo, skinMat, bowSurvSpots.length);
+  const bowSurvVestInst = new THREE.InstancedMesh(survVestGeo, survVestMat, bowSurvSpots.length);
+  const sternSurvBodyInst = new THREE.InstancedMesh(survBodyGeo, survBodyMat, sternSurvSpots.length);
+  const sternSurvHeadInst = new THREE.InstancedMesh(survHeadGeo, skinMat, sternSurvSpots.length);
+  const sternSurvVestInst = new THREE.InstancedMesh(survVestGeo, survVestMat, sternSurvSpots.length);
+
+  for (const inst of [
+    bowSurvBodyInst,
+    bowSurvHeadInst,
+    bowSurvVestInst,
+    sternSurvBodyInst,
+    sternSurvHeadInst,
+    sternSurvVestInst,
+  ]) {
+    inst.frustumCulled = false;
+  }
 
   const coatColors = [0x1c2430, 0x3a2a22, 0x5c232d, 0x243e4d, 0x4b3d57, 0x26443b, 0x8c7355];
   const tmpCol = new THREE.Color();
-  for (let i = 0; i < MAX_SURVIVOR_FIGURES; i++) {
-    tmpCol.setHex(coatColors[i % coatColors.length]);
-    survBodyInst.setColorAt(i, tmpCol);
-    survBodyInst.setMatrixAt(i, _zeroMat);
-    survHeadInst.setMatrixAt(i, _zeroMat);
-    survVestInst.setMatrixAt(i, _zeroMat);
+  for (const [arr, bInst, hInst, vInst] of [
+    [bowSurvSpots, bowSurvBodyInst, bowSurvHeadInst, bowSurvVestInst],
+    [sternSurvSpots, sternSurvBodyInst, sternSurvHeadInst, sternSurvVestInst],
+  ] as const) {
+    for (let i = 0; i < arr.length; i++) {
+      tmpCol.setHex(coatColors[arr[i].orderIdx % coatColors.length]);
+      bInst.setColorAt(i, tmpCol);
+      bInst.setMatrixAt(i, _zeroMat);
+      hInst.setMatrixAt(i, _zeroMat);
+      vInst.setMatrixAt(i, _zeroMat);
+    }
+    if (bInst.instanceColor) bInst.instanceColor.needsUpdate = true;
+    bInst.instanceMatrix.needsUpdate = true;
+    hInst.instanceMatrix.needsUpdate = true;
+    vInst.instanceMatrix.needsUpdate = true;
   }
-  if (survBodyInst.instanceColor) survBodyInst.instanceColor.needsUpdate = true;
-  survBodyInst.instanceMatrix.needsUpdate = true;
-  survHeadInst.instanceMatrix.needsUpdate = true;
-  survVestInst.instanceMatrix.needsUpdate = true;
 
-  root.add(survBodyInst);
-  root.add(survHeadInst);
-  root.add(survVestInst);
+  bowContent.add(bowSurvBodyInst, bowSurvHeadInst, bowSurvVestInst);
+  sternContent.add(sternSurvBodyInst, sternSurvHeadInst, sternSurvVestInst);
 
   const setNavalState = (
     time: number,
@@ -1098,7 +1315,6 @@ export function buildWarshipShip(
     const clampedNight = THREE.MathUtils.clamp(nightMix, 0, 1);
     warmGlowMat.emissiveIntensity = 0.35 + clampedNight * 1.65;
 
-    // Gentle naval watch traverse or active combat slewing onto target submarine
     const combatAim = rescueOptions?.combatAim;
     const flashAlpha = combatAim ? THREE.MathUtils.clamp(combatAim.firingFlash, 0, 1) : 0;
     muzzleFlashMat.opacity = flashAlpha;
@@ -1136,7 +1352,8 @@ export function buildWarshipShip(
 
     const laddersDeployed = Boolean(rescueOptions?.laddersDeployed);
     const boardedRatio = rescueOptions?.boardedRatio ?? 0;
-    laddersGroup.visible = laddersDeployed;
+    bowLaddersGroup.visible = laddersDeployed;
+    sternLaddersGroup.visible = laddersDeployed;
     rescueDeckLight.intensity = laddersDeployed ? 14.0 : searchlightSweep ? 5.5 : 0;
 
     if (searchlightSweep) {
@@ -1157,60 +1374,99 @@ export function buildWarshipShip(
     }
 
     _vScale.set(1, 1, 1);
-    for (let i = 0; i < crewSpots.length; i++) {
-      const [cx, cy, cz, ry] = crewSpots[i];
-      const sway = Math.sin(time * 1.15 + i * 0.9) * 0.015;
-      const look = Math.sin(time * 0.65 + i * 1.4) * 0.16;
-      _euler.set(0, ry + look, 0);
-      _qRot.setFromEuler(_euler);
-      _mat4.compose(_vPos.set(cx, cy + sway, cz), _qRot, _vScale);
-      crewBodyInst.setMatrixAt(i, _mat4);
-      crewHeadInst.setMatrixAt(i, _mat4);
-      crewCapInst.setMatrixAt(i, _mat4);
+    for (const [arr, bInst, hInst, cInst] of [
+      [bowCrewSpots, bowCrewBodyInst, bowCrewHeadInst, bowCrewCapInst],
+      [sternCrewSpots, sternCrewBodyInst, sternCrewHeadInst, sternCrewCapInst],
+    ] as const) {
+      for (let i = 0; i < arr.length; i++) {
+        const [cx, cy, cz, ry] = arr[i];
+        const sway = Math.sin(time * 1.15 + i * 0.9) * 0.015;
+        const look = Math.sin(time * 0.65 + i * 1.4) * 0.16;
+        _euler.set(0, ry + look, 0);
+        _qRot.setFromEuler(_euler);
+        _mat4.compose(_vPos.set(cx, cy + sway, cz), _qRot, _vScale);
+        bInst.setMatrixAt(i, _mat4);
+        hInst.setMatrixAt(i, _mat4);
+        cInst.setMatrixAt(i, _mat4);
+      }
+      bInst.instanceMatrix.needsUpdate = true;
+      hInst.instanceMatrix.needsUpdate = true;
+      cInst.instanceMatrix.needsUpdate = true;
     }
-    crewBodyInst.instanceMatrix.needsUpdate = true;
-    crewHeadInst.instanceMatrix.needsUpdate = true;
-    crewCapInst.instanceMatrix.needsUpdate = true;
 
     const visibleSurvivors = Math.round(
       THREE.MathUtils.clamp(boardedRatio, 0, 1) * MAX_SURVIVOR_FIGURES,
     );
-    for (let i = 0; i < MAX_SURVIVOR_FIGURES; i++) {
-      if (i >= visibleSurvivors) {
-        survBodyInst.setMatrixAt(i, _zeroMat);
-        survHeadInst.setMatrixAt(i, _zeroMat);
-        survVestInst.setMatrixAt(i, _zeroMat);
-      } else {
-        const sp = survivorSpots[i];
-        const swayY = Math.sin(time * 1.4 + sp.phase) * 0.014;
-        let climbOffset = 0;
-        if (sp.onLadder !== undefined && laddersDeployed) {
-          climbOffset = ((time * 0.55 + sp.phase) % 1) * 2.0;
+    for (const [arr, bInst, hInst, vInst] of [
+      [bowSurvSpots, bowSurvBodyInst, bowSurvHeadInst, bowSurvVestInst],
+      [sternSurvSpots, sternSurvBodyInst, sternSurvHeadInst, sternSurvVestInst],
+    ] as const) {
+      for (let i = 0; i < arr.length; i++) {
+        const sp = arr[i];
+        if (sp.orderIdx >= visibleSurvivors) {
+          bInst.setMatrixAt(i, _zeroMat);
+          hInst.setMatrixAt(i, _zeroMat);
+          vInst.setMatrixAt(i, _zeroMat);
+        } else {
+          const swayY = Math.sin(time * 1.4 + sp.phase) * 0.014;
+          let climbOffset = 0;
+          if (sp.onLadder !== undefined && laddersDeployed) {
+            climbOffset = ((time * 0.55 + sp.phase) % 1) * 2.0;
+          }
+          _euler.set(0, sp.ry + Math.sin(time * 0.8 + sp.phase) * 0.15, 0);
+          _qRot.setFromEuler(_euler);
+          _mat4.compose(
+            _vPos.set(sp.x, sp.y + swayY + climbOffset, sp.z),
+            _qRot,
+            _vScale,
+          );
+          bInst.setMatrixAt(i, _mat4);
+          hInst.setMatrixAt(i, _mat4);
+          vInst.setMatrixAt(i, _mat4);
         }
-        _euler.set(0, sp.ry + Math.sin(time * 0.8 + sp.phase) * 0.15, 0);
-        _qRot.setFromEuler(_euler);
-        _mat4.compose(
-          _vPos.set(sp.x, sp.y + swayY + climbOffset, sp.z),
-          _qRot,
-          _vScale,
-        );
-        survBodyInst.setMatrixAt(i, _mat4);
-        survHeadInst.setMatrixAt(i, _mat4);
-        survVestInst.setMatrixAt(i, _mat4);
       }
+      bInst.instanceMatrix.needsUpdate = true;
+      hInst.instanceMatrix.needsUpdate = true;
+      vInst.instanceMatrix.needsUpdate = true;
     }
-    survBodyInst.instanceMatrix.needsUpdate = true;
-    survHeadInst.instanceMatrix.needsUpdate = true;
-    survVestInst.instanceMatrix.needsUpdate = true;
+  };
+
+  const setBreakupVisual = (broken: boolean, emberPower = 0) => {
+    bowBreakCap.visible = broken;
+    sternBreakCap.visible = broken;
+    aerialsGroup.visible = !broken;
+    breakEmberMat.emissiveIntensity = broken ? THREE.MathUtils.clamp(emberPower, 0, 1.5) : 0;
+    if (broken && emberPower <= 0.15) {
+      warmGlowMat.emissiveIntensity = 0.2;
+      navalSpotLight.intensity = 0;
+      rescueDeckLight.intensity = 0;
+    }
+  };
+
+  const reset = () => {
+    root.visible = true;
+    hullMeshGroup.position.set(0, 0, 0);
+    hullMeshGroup.rotation.set(0, 0, 0);
+    bowGroup.position.set(0, 0, WARSHIP_BREAK_Z);
+    bowGroup.rotation.set(0, 0, 0);
+    sternGroup.position.set(0, 0, WARSHIP_BREAK_Z);
+    sternGroup.rotation.set(0, 0, 0);
+    setBreakupVisual(false, 0);
   };
 
   return {
     root,
+    hullMeshGroup,
+    bowGroup,
+    sternGroup,
     boardingStationsLocal,
     setNavalState,
+    setBreakupVisual,
+    reset,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());
     },
   };
 }
+

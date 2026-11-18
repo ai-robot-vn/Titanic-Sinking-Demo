@@ -8,6 +8,7 @@ export interface HarborCircleObstacle {
   z: number;
   radius: number;
   label: string;
+  active: boolean;
 }
 
 export interface HarborBoxObstacle {
@@ -18,6 +19,14 @@ export interface HarborBoxObstacle {
   minZ: number;
   maxZ: number;
   label: string;
+}
+
+export interface EscortBreakEvent {
+  id: string;
+  label: string;
+  x: number;
+  z: number;
+  phase: 'impact' | 'snap';
 }
 
 export interface HarborRig {
@@ -35,6 +44,9 @@ export interface HarborRig {
     escortActive?: boolean,
   ) => void;
   resetEscorts: () => void;
+  triggerEscortStrike: (id: string) => EscortBreakEvent | null;
+  consumeBreakEvents: () => readonly EscortBreakEvent[];
+  getEscortStates: () => ReadonlyArray<{ id: string; status: 'active' | 'sinking' | 'sunk'; x: number; z: number; radius: number; label: string }>;
   getCircleObstacles: () => readonly HarborCircleObstacle[];
   getBoxObstacles: () => readonly HarborBoxObstacle[];
   dispose: () => void;
@@ -1027,8 +1039,34 @@ export function buildSouthamptonHarbor(
 
   // =========================================================================
   // 7. CONSCIOUS SMALLER HARBOR VESSELS POSITIONED ON EITHER SIDE OF TITANIC
-  //    (Active Port/Starboard Flanking + Real-Time Collision Avoidance AI)
+  //    (Active Port/Starboard Flanking + Real-Time Collision Avoidance AI + Breakup/Sinking)
   // =========================================================================
+  const escTornSteelMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1c2128,
+      roughness: 0.78,
+      metalness: 0.65,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const escTornRustMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x4b241d,
+      roughness: 0.88,
+      metalness: 0.35,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const escEmberMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x381508,
+      emissive: new THREE.Color(0xff6b21),
+      emissiveIntensity: 0.9,
+      roughness: 0.55,
+      side: THREE.DoubleSide,
+    }),
+  );
+
   interface EscortVesselRig {
     id: string;
     kind: 'tug' | 'pilot' | 'lifeboat';
@@ -1037,6 +1075,11 @@ export function buildSouthamptonHarbor(
     preferredAlong: number; // desired Z relative to Titanic (+ is astern, - is ahead)
     preferredLatDist: number; // target lateral clearance from Titanic centerline (34..54m)
     group: THREE.Group;
+    hullRollGroup: THREE.Group;
+    bowGroup: THREE.Group;
+    sternGroup: THREE.Group;
+    bowCap: THREE.Group;
+    sternCap: THREE.Group;
     oars: THREE.Group[];
     lanternMesh: THREE.Mesh;
     initX: number;
@@ -1051,9 +1094,77 @@ export function buildSouthamptonHarbor(
     radius: number;
     phase: number;
     aiState: 'standby_flank' | 'escort_flank' | 'evade_titanic' | 'evade_obstacle' | 'rescue_standby';
+    status: 'active' | 'sinking' | 'sunk';
+    sinkElapsed: number;
+    broken: boolean;
+    listDir: -1 | 1;
   }
 
   const escorts: EscortVesselRig[] = [];
+  const pendingBreakEvents: EscortBreakEvent[] = [];
+
+  const tugBowShape = new THREE.Shape();
+  tugBowShape.moveTo(-3.55, 0);
+  tugBowShape.lineTo(3.55, 0);
+  tugBowShape.quadraticCurveTo(3.15, -7.2, 0, -14);
+  tugBowShape.quadraticCurveTo(-3.15, -7.2, -3.55, 0);
+
+  const tugSternShape = new THREE.Shape();
+  tugSternShape.moveTo(-3.55, 0);
+  tugSternShape.quadraticCurveTo(-3.25, 10.6, 0, 13.5);
+  tugSternShape.quadraticCurveTo(3.25, 10.6, 3.55, 0);
+  tugSternShape.lineTo(-3.55, 0);
+
+  const tugLowerBowGeo = trackGeo(new THREE.ExtrudeGeometry(tugBowShape, { depth: 2.0, bevelEnabled: false }));
+  tugLowerBowGeo.rotateX(Math.PI / 2);
+  const tugLowerSternGeo = trackGeo(new THREE.ExtrudeGeometry(tugSternShape, { depth: 2.0, bevelEnabled: false }));
+  tugLowerSternGeo.rotateX(Math.PI / 2);
+
+  const tugUpperBowGeo = trackGeo(new THREE.ExtrudeGeometry(tugBowShape, { depth: 1.8, bevelEnabled: false }));
+  tugUpperBowGeo.rotateX(Math.PI / 2);
+  const tugUpperSternGeo = trackGeo(new THREE.ExtrudeGeometry(tugSternShape, { depth: 1.8, bevelEnabled: false }));
+  tugUpperSternGeo.rotateX(Math.PI / 2);
+
+  const buildEscortCap = (halfW: number, yMin: number, yMax: number, dirZ: -1 | 1): THREE.Group => {
+    const cap = new THREE.Group();
+    const plate = new THREE.Mesh(
+      trackGeo(new THREE.PlaneGeometry(halfW * 1.92, yMax - yMin)),
+      escTornSteelMat,
+    );
+    plate.position.set(0, (yMin + yMax) * 0.5, dirZ * 0.04);
+    if (dirZ < 0) plate.rotation.y = Math.PI;
+    cap.add(plate);
+
+    const frame = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(halfW * 1.82, 0.16, 0.35)),
+      escTornRustMat,
+    );
+    frame.position.set(0, yMax - 0.12, dirZ * 0.12);
+    cap.add(frame);
+
+    const ember = new THREE.Mesh(
+      trackGeo(new THREE.PlaneGeometry(halfW * 0.95, (yMax - yMin) * 0.42)),
+      escEmberMat,
+    );
+    ember.position.set(0, (yMin + yMax) * 0.52, dirZ * 0.09);
+    if (dirZ < 0) ember.rotation.y = Math.PI;
+    cap.add(ember);
+
+    for (let si = 0; si < 5; si++) {
+      const sx = -halfW * 0.72 + si * (halfW * 0.36);
+      const sy = THREE.MathUtils.lerp(yMin + 0.3, yMax - 0.2, ((si * 3) % 5) / 4);
+      const shard = new THREE.Mesh(
+        trackGeo(new THREE.ConeGeometry(0.18, 0.58, 4)),
+        si % 2 === 0 ? escTornSteelMat : escTornRustMat,
+      );
+      shard.rotation.x = dirZ * (Math.PI / 2);
+      shard.position.set(sx, sy, dirZ * 0.25);
+      cap.add(shard);
+    }
+
+    cap.visible = false;
+    return cap;
+  };
 
   const buildSteamVessel = (
     id: string,
@@ -1073,48 +1184,61 @@ export function buildSouthamptonHarbor(
     tug.rotation.y = yaw;
     tug.scale.setScalar(isPilot ? 0.88 : 1.0);
 
-    const tugShape = new THREE.Shape();
-    tugShape.moveTo(0, -14);
-    tugShape.quadraticCurveTo(3.4, -7, 3.6, 2);
-    tugShape.quadraticCurveTo(3.3, 11, 0, 13.5);
-    tugShape.quadraticCurveTo(-3.3, 11, -3.6, 2);
-    tugShape.quadraticCurveTo(-3.4, -7, 0, -14);
+    const hullRollGroup = new THREE.Group();
+    tug.add(hullRollGroup);
 
-    const lowerHullGeo = trackGeo(
-      new THREE.ExtrudeGeometry(tugShape, {
-        depth: 2.0,
-        bevelEnabled: true,
-        bevelThickness: 0.25,
-        bevelSize: 0.2,
-        bevelSegments: 2,
-      }),
-    );
-    lowerHullGeo.rotateX(Math.PI / 2);
-    const lowerHull = new THREE.Mesh(lowerHullGeo, rustRedMat);
-    lowerHull.position.y = 0.6;
-    tug.add(lowerHull);
+    const bowGroup = new THREE.Group();
+    const sternGroup = new THREE.Group();
+    hullRollGroup.add(bowGroup, sternGroup);
 
-    const upperHullGeo = trackGeo(
-      new THREE.ExtrudeGeometry(tugShape, { depth: 1.8, bevelEnabled: false }),
-    );
-    upperHullGeo.rotateX(Math.PI / 2);
-    const upperHull = new THREE.Mesh(upperHullGeo, isPilot ? creamPaintMat : darkIronMat);
-    upperHull.position.y = 2.4;
-    upperHull.castShadow = !isSoftwareGl;
-    tug.add(upperHull);
+    const upperMat = isPilot ? creamPaintMat : darkIronMat;
 
-    const deck = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.6, 0.25, 22)), buffFunnelMat);
-    deck.position.y = 2.52;
-    tug.add(deck);
+    const lowerBow = new THREE.Mesh(tugLowerBowGeo, rustRedMat);
+    lowerBow.position.y = 0.6;
+    bowGroup.add(lowerBow);
+
+    const upperBow = new THREE.Mesh(tugUpperBowGeo, upperMat);
+    upperBow.position.y = 2.4;
+    upperBow.castShadow = !isSoftwareGl;
+    bowGroup.add(upperBow);
+
+    const deckBow = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.6, 0.25, 11)), buffFunnelMat);
+    deckBow.position.set(0, 2.52, -5.5);
+    bowGroup.add(deckBow);
 
     const cabin = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.4, 2.6, 5.2)), creamPaintMat);
     cabin.position.set(0, 3.8, -3.2);
     cabin.castShadow = !isSoftwareGl;
-    tug.add(cabin);
+    bowGroup.add(cabin);
 
     const roof = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.9, 0.28, 5.8)), darkIronMat);
     roof.position.set(0, 5.2, -3.2);
-    tug.add(roof);
+    bowGroup.add(roof);
+
+    const mast = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.14, 9.2, 8)), buffFunnelMat);
+    mast.position.set(0, 7.2, -6.4);
+    bowGroup.add(mast);
+
+    const tugLamp = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.24, 8, 8)), warmLanternMat);
+    tugLamp.position.set(0, 11.4, -6.4);
+    bowGroup.add(tugLamp);
+
+    const bowCap = buildEscortCap(3.45, -1.35, 2.55, 1);
+    bowGroup.add(bowCap);
+
+    // Stern half (z >= 0)
+    const lowerStern = new THREE.Mesh(tugLowerSternGeo, rustRedMat);
+    lowerStern.position.y = 0.6;
+    sternGroup.add(lowerStern);
+
+    const upperStern = new THREE.Mesh(tugUpperSternGeo, upperMat);
+    upperStern.position.y = 2.4;
+    upperStern.castShadow = !isSoftwareGl;
+    sternGroup.add(upperStern);
+
+    const deckStern = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.6, 0.25, 11)), buffFunnelMat);
+    deckStern.position.set(0, 2.52, 5.5);
+    sternGroup.add(deckStern);
 
     const funnel = new THREE.Mesh(
       trackGeo(new THREE.CylinderGeometry(0.68, 0.78, 6.2, 16)),
@@ -1123,20 +1247,15 @@ export function buildSouthamptonHarbor(
     funnel.position.set(0, 5.8, 2.2);
     funnel.rotation.x = 0.08;
     funnel.castShadow = !isSoftwareGl;
-    tug.add(funnel);
+    sternGroup.add(funnel);
 
     const funnelCap = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.7, 0.7, 1.3, 16)), darkIronMat);
     funnelCap.position.set(0, 8.4, 2.4);
     funnelCap.rotation.x = 0.08;
-    tug.add(funnelCap);
+    sternGroup.add(funnelCap);
 
-    const mast = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.14, 9.2, 8)), buffFunnelMat);
-    mast.position.set(0, 7.2, -6.4);
-    tug.add(mast);
-
-    const tugLamp = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.24, 8, 8)), warmLanternMat);
-    tugLamp.position.set(0, 11.4, -6.4);
-    tug.add(tugLamp);
+    const sternCap = buildEscortCap(3.45, -1.35, 2.55, -1);
+    sternGroup.add(sternCap);
 
     root.add(tug);
     escorts.push({
@@ -1147,6 +1266,11 @@ export function buildSouthamptonHarbor(
       preferredAlong,
       preferredLatDist,
       group: tug,
+      hullRollGroup,
+      bowGroup,
+      sternGroup,
+      bowCap,
+      sternCap,
       oars: [],
       lanternMesh: tugLamp,
       initX: x,
@@ -1161,6 +1285,10 @@ export function buildSouthamptonHarbor(
       radius: isPilot ? 6.2 : 7.0,
       phase,
       aiState: 'standby_flank',
+      status: 'active',
+      sinkElapsed: 0,
+      broken: false,
+      listDir: escorts.length % 2 === 0 ? 1 : -1,
     });
   };
 
@@ -1171,23 +1299,23 @@ export function buildSouthamptonHarbor(
   buildSteamVessel('pilot_cutter', 'SOUTHAMPTON PILOT CUTTER', 1, -118, 44, 44, -214, -0.04, 10.6, 1.2, true);
   buildSteamVessel('tug_stbd_fwd', 'HARBOR ESCORT TUG VULCAN', 1, -48, 39, 41, -290, -0.03, 9.8, 2.3, false);
 
-  // Floating Wooden Harbor Lifeboats / Rowing Cutters on Either Flank in Southampton Water
-  const hBoatShape = new THREE.Shape();
-  hBoatShape.moveTo(0, -4.6);
-  hBoatShape.quadraticCurveTo(1.55, -2.0, 1.55, 0.2);
-  hBoatShape.quadraticCurveTo(1.45, 2.6, 0, 4.6);
-  hBoatShape.quadraticCurveTo(-1.45, 2.6, -1.55, 0.2);
-  hBoatShape.quadraticCurveTo(-1.55, -2.0, 0, -4.6);
-  const hBoatHullGeo = trackGeo(
-    new THREE.ExtrudeGeometry(hBoatShape, {
-      depth: 0.92,
-      bevelEnabled: true,
-      bevelThickness: 0.12,
-      bevelSize: 0.1,
-      bevelSegments: 2,
-    }),
-  );
-  hBoatHullGeo.rotateX(Math.PI / 2);
+  // Floating Wooden Harbor Lifeboats / Rowing Cutters on Either Flank in Southampton Water (split cleanly at z=0)
+  const hBoatBowShape = new THREE.Shape();
+  hBoatBowShape.moveTo(-1.55, 0);
+  hBoatBowShape.lineTo(1.55, 0);
+  hBoatBowShape.quadraticCurveTo(1.45, -2.5, 0, -4.6);
+  hBoatBowShape.quadraticCurveTo(-1.45, -2.5, -1.55, 0);
+
+  const hBoatSternShape = new THREE.Shape();
+  hBoatSternShape.moveTo(-1.55, 0);
+  hBoatSternShape.quadraticCurveTo(-1.45, 2.6, 0, 4.6);
+  hBoatSternShape.quadraticCurveTo(1.45, 2.6, 1.55, 0);
+  hBoatSternShape.lineTo(-1.55, 0);
+
+  const hBoatBowGeo = trackGeo(new THREE.ExtrudeGeometry(hBoatBowShape, { depth: 0.92, bevelEnabled: false }));
+  hBoatBowGeo.rotateX(Math.PI / 2);
+  const hBoatSternGeo = trackGeo(new THREE.ExtrudeGeometry(hBoatSternShape, { depth: 0.92, bevelEnabled: false }));
+  hBoatSternGeo.rotateX(Math.PI / 2);
 
   const harborBoatSpecs: Array<{
     id: string;
@@ -1209,15 +1337,34 @@ export function buildSouthamptonHarbor(
     const lb = new THREE.Group();
     lb.position.set(spec.x, 0.2, spec.z);
     lb.rotation.y = spec.yaw;
-    const hull = new THREE.Mesh(hBoatHullGeo, creamPaintMat);
-    hull.position.y = 0.52;
-    lb.add(hull);
-    const gunwale = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.4, 0.12, 6.4)), buffFunnelMat);
-    gunwale.position.y = 0.52;
-    lb.add(gunwale);
+
+    const hullRollGroup = new THREE.Group();
+    lb.add(hullRollGroup);
+
+    const bowGroup = new THREE.Group();
+    const sternGroup = new THREE.Group();
+    hullRollGroup.add(bowGroup, sternGroup);
+
+    const hullBow = new THREE.Mesh(hBoatBowGeo, creamPaintMat);
+    hullBow.position.y = 0.52;
+    bowGroup.add(hullBow);
+    const gunwaleBow = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.4, 0.12, 3.2)), buffFunnelMat);
+    gunwaleBow.position.set(0, 0.52, -1.6);
+    bowGroup.add(gunwaleBow);
     const lantern = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.18, 8, 8)), warmLanternMat);
     lantern.position.set(0, 1.12, -3.2);
-    lb.add(lantern);
+    bowGroup.add(lantern);
+    const bowCap = buildEscortCap(1.48, -0.4, 0.56, 1);
+    bowGroup.add(bowCap);
+
+    const hullStern = new THREE.Mesh(hBoatSternGeo, creamPaintMat);
+    hullStern.position.y = 0.52;
+    sternGroup.add(hullStern);
+    const gunwaleStern = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.4, 0.12, 3.2)), buffFunnelMat);
+    gunwaleStern.position.set(0, 0.52, 1.6);
+    sternGroup.add(gunwaleStern);
+    const sternCap = buildEscortCap(1.48, -0.4, 0.56, -1);
+    sternGroup.add(sternCap);
 
     const oars: THREE.Group[] = [];
     for (const s of [-1, 1]) {
@@ -1228,7 +1375,7 @@ export function buildSouthamptonHarbor(
         blade.rotation.z = s * 1.15;
         blade.position.set(s * 1.1, -0.36, 0);
         oar.add(blade);
-        lb.add(oar);
+        (oz < 0 ? bowGroup : sternGroup).add(oar);
         oars.push(oar);
       }
     }
@@ -1242,6 +1389,11 @@ export function buildSouthamptonHarbor(
       preferredAlong: spec.along,
       preferredLatDist: spec.lat,
       group: lb,
+      hullRollGroup,
+      bowGroup,
+      sternGroup,
+      bowCap,
+      sternCap,
       oars,
       lanternMesh: lantern,
       initX: spec.x,
@@ -1256,6 +1408,10 @@ export function buildSouthamptonHarbor(
       radius: 4.2,
       phase: i * 1.7,
       aiState: 'standby_flank',
+      status: 'active',
+      sinkElapsed: 0,
+      broken: false,
+      listDir: i % 2 === 0 ? -1 : 1,
     });
   }
 
@@ -1392,6 +1548,7 @@ export function buildSouthamptonHarbor(
       z: e.z,
       radius: e.radius,
       label: e.label,
+      active: true,
     });
   }
   for (let i = 0; i < buoys.length; i++) {
@@ -1403,6 +1560,7 @@ export function buildSouthamptonHarbor(
       z: b.group.position.z,
       radius: 2.2,
       label: 'CHANNEL BELL BUOY',
+      active: true,
     });
   }
   for (const side of [-1, 1]) {
@@ -1413,6 +1571,7 @@ export function buildSouthamptonHarbor(
       z: -497,
       radius: 15.2,
       label: 'BREAKWATER LIGHTHOUSE PIER',
+      active: true,
     });
   }
 
@@ -1464,9 +1623,26 @@ export function buildSouthamptonHarbor(
     },
   ];
 
+  const triggerEscortStrike = (id: string): EscortBreakEvent | null => {
+    const idx = escorts.findIndex((item) => item.id === id);
+    if (idx === -1) return null;
+    const e = escorts[idx];
+    if (e.status !== 'active') return null;
+    e.status = 'sinking';
+    e.sinkElapsed = 0;
+    e.broken = false;
+    e.bowCap.visible = false;
+    e.sternCap.visible = false;
+    circleObstacles[idx].active = false;
+    const ev: EscortBreakEvent = { id: e.id, label: e.label, x: e.x, z: e.z, phase: 'impact' };
+    pendingBreakEvents.push(ev);
+    return ev;
+  };
+
   const resetEscorts = () => {
     gangwaysGroup.position.x = 0;
     mooredNewYork.position.set(-113, 0, 38);
+    pendingBreakEvents.length = 0;
     for (let i = 0; i < escorts.length; i++) {
       const e = escorts[i];
       e.x = e.initX;
@@ -1475,10 +1651,22 @@ export function buildSouthamptonHarbor(
       e.roll = 0;
       e.curSpeed = 0;
       e.aiState = 'standby_flank';
+      e.status = 'active';
+      e.sinkElapsed = 0;
+      e.broken = false;
+      e.group.visible = true;
       e.group.position.set(e.x, e.kind === 'lifeboat' ? 0.2 : 0, e.z);
       e.group.rotation.set(0, e.yaw, 0);
+      e.hullRollGroup.rotation.set(0, 0, 0);
+      e.bowGroup.position.set(0, 0, 0);
+      e.bowGroup.rotation.set(0, 0, 0);
+      e.sternGroup.position.set(0, 0, 0);
+      e.sternGroup.rotation.set(0, 0, 0);
+      e.bowCap.visible = false;
+      e.sternCap.visible = false;
       circleObstacles[i].x = e.x;
       circleObstacles[i].z = e.z;
+      circleObstacles[i].active = true;
     }
   };
 
@@ -1504,6 +1692,62 @@ export function buildSouthamptonHarbor(
 
     for (let i = 0; i < escorts.length; i++) {
       const e = escorts[i];
+
+      if (e.status === 'sunk') {
+        e.group.visible = false;
+        continue;
+      }
+
+      if (e.status === 'sinking') {
+        if (dt > 0) {
+          e.sinkElapsed += dt;
+          e.curSpeed = THREE.MathUtils.damp(e.curSpeed, 0, 1.4, dt);
+          e.x -= Math.sin(e.yaw) * e.curSpeed * dt;
+          e.z -= Math.cos(e.yaw) * e.curSpeed * dt;
+        }
+        const p = THREE.MathUtils.clamp(e.sinkElapsed / 9.5, 0, 1);
+        const dropScale = e.kind === 'lifeboat' ? 0.45 : 1.0;
+
+        if (p < 0.24) {
+          const s1 = p / 0.24;
+          const pitch = THREE.MathUtils.lerp(0, -0.34, s1);
+          const dropY = THREE.MathUtils.lerp(0, -1.6 * dropScale, s1);
+          e.hullRollGroup.rotation.z = e.listDir * THREE.MathUtils.lerp(0.08, 0.28, s1);
+          e.bowGroup.position.y = dropY;
+          e.bowGroup.rotation.x = pitch;
+          e.sternGroup.position.y = dropY;
+          e.sternGroup.rotation.x = pitch;
+        } else {
+          if (!e.broken) {
+            e.broken = true;
+            e.bowCap.visible = true;
+            e.sternCap.visible = true;
+            pendingBreakEvents.push({ id: e.id, label: e.label, x: e.x, z: e.z, phase: 'snap' });
+          }
+          const bowT = THREE.MathUtils.clamp((p - 0.24) / 0.45, 0, 1);
+          e.bowGroup.rotation.x = THREE.MathUtils.lerp(-0.34, -0.92, bowT);
+          e.bowGroup.position.y = THREE.MathUtils.lerp(-1.6 * dropScale, -16.5 * dropScale, bowT);
+
+          if (p < 0.42) {
+            const settleT = (p - 0.24) / 0.18;
+            e.sternGroup.rotation.x = THREE.MathUtils.lerp(-0.34, -0.06, settleT);
+            e.sternGroup.position.y = THREE.MathUtils.lerp(-1.6 * dropScale, -0.6 * dropScale, settleT);
+          } else {
+            const plungeT = (p - 0.42) / 0.58;
+            e.sternGroup.rotation.x = THREE.MathUtils.lerp(-0.06, -1.32, plungeT);
+            e.sternGroup.position.y = THREE.MathUtils.lerp(-0.6 * dropScale, -22.0 * dropScale, Math.pow(plungeT, 1.15));
+          }
+          e.hullRollGroup.rotation.z = e.listDir * THREE.MathUtils.lerp(0.28, 0.14, (p - 0.24) / 0.76);
+        }
+
+        e.group.position.set(e.x, e.kind === 'lifeboat' ? 0.2 : 0, e.z);
+        e.group.rotation.set(0, e.yaw, 0);
+        if (p >= 1) {
+          e.status = 'sunk';
+          e.group.visible = false;
+        }
+        continue;
+      }
 
       if (escortActive && dt > 0) {
         // Compute relative position in Titanic's body-fixed frame
@@ -1584,6 +1828,7 @@ export function buildSouthamptonHarbor(
         }
 
         // --- AWARE QUAY WALLS, BREAKWATERS & MOORED SHIPS AVOIDANCE ---
+        let struckObject = false;
         for (let b = 0; b < boxObstacles.length; b++) {
           const box = boxObstacles[b];
           const cx = THREE.MathUtils.clamp(e.x, box.minX, box.maxX);
@@ -1591,6 +1836,10 @@ export function buildSouthamptonHarbor(
           const vx = e.x - cx;
           const vz = e.z - cz;
           const d = Math.hypot(vx, vz);
+          if (d < e.radius * 0.72) {
+            struckObject = true;
+            break;
+          }
           const margin = e.radius + 7.5;
           if (d < margin) {
             e.aiState = 'evade_obstacle';
@@ -1603,18 +1852,33 @@ export function buildSouthamptonHarbor(
         }
 
         // --- AWARE NEIGHBOR VESSEL & BUOY SEPARATION ---
-        for (let j = 0; j < circleObstacles.length; j++) {
-          if (j === i) continue;
-          const ob = circleObstacles[j];
-          const vx = e.x - ob.x;
-          const vz = e.z - ob.z;
-          const d = Math.hypot(vx, vz);
-          const minSep = e.radius + ob.radius + 11.0;
-          if (d < minSep && d > 0.01) {
-            const push = ((minSep - d) / minSep) * 2.8;
-            avoidX += (vx / d) * push;
-            avoidZ += (vz / d) * push;
+        if (!struckObject) {
+          for (let j = 0; j < circleObstacles.length; j++) {
+            if (j === i) continue;
+            const ob = circleObstacles[j];
+            if (!ob.active) continue;
+            const vx = e.x - ob.x;
+            const vz = e.z - ob.z;
+            const d = Math.hypot(vx, vz);
+            if (d < (e.radius + ob.radius) * 0.78) {
+              struckObject = true;
+              if (j < escorts.length) {
+                triggerEscortStrike(ob.id);
+              }
+              break;
+            }
+            const minSep = e.radius + ob.radius + 11.0;
+            if (d < minSep && d > 0.01) {
+              const push = ((minSep - d) / minSep) * 2.8;
+              avoidX += (vx / d) * push;
+              avoidZ += (vz / d) * push;
+            }
           }
+        }
+
+        if (struckObject) {
+          triggerEscortStrike(e.id);
+          continue;
         }
 
         const combX = steerX * 0.85 + avoidX;
@@ -1651,7 +1915,7 @@ export function buildSouthamptonHarbor(
       const bobAmp = e.kind === 'lifeboat' ? 0.14 : 0.16;
       e.group.position.y = (e.kind === 'lifeboat' ? 0.22 : 0) + Math.sin(simTime * 1.5 + e.phase) * bobAmp;
       e.group.rotation.y = e.yaw;
-      e.group.rotation.z = e.roll + Math.sin(simTime * 1.1 + e.phase) * 0.025;
+      e.hullRollGroup.rotation.z = e.roll + Math.sin(simTime * 1.1 + e.phase) * 0.025;
       e.group.rotation.x = Math.cos(simTime * 0.9 + e.phase) * 0.015;
 
       if (e.oars.length > 0) {
@@ -1760,11 +2024,42 @@ export function buildSouthamptonHarbor(
     ownTextures.forEach((t) => t.dispose());
   };
 
+  const escortStatesOut: Array<{ id: string; status: 'active' | 'sinking' | 'sunk'; x: number; z: number; radius: number; label: string }> = escorts.map((e) => ({
+    id: e.id,
+    status: e.status,
+    x: e.x,
+    z: e.z,
+    radius: e.radius,
+    label: e.label,
+  }));
+
+  const getEscortStates = () => {
+    for (let i = 0; i < escorts.length; i++) {
+      escortStatesOut[i].status = escorts[i].status;
+      escortStatesOut[i].x = escorts[i].x;
+      escortStatesOut[i].z = escorts[i].z;
+    }
+    return escortStatesOut;
+  };
+
+  const outBreakEvents: EscortBreakEvent[] = [];
+  const consumeBreakEvents = (): readonly EscortBreakEvent[] => {
+    outBreakEvents.length = 0;
+    for (let i = 0; i < pendingBreakEvents.length; i++) {
+      outBreakEvents.push(pendingBreakEvents[i]);
+    }
+    pendingBreakEvents.length = 0;
+    return outBreakEvents;
+  };
+
   return {
     root,
     hawsersGroup,
     update,
     resetEscorts,
+    triggerEscortStrike,
+    consumeBreakEvents,
+    getEscortStates,
     getCircleObstacles: () => circleObstacles,
     getBoxObstacles: () => boxObstacles,
     dispose,

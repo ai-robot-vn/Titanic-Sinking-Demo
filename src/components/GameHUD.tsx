@@ -185,17 +185,27 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             </div>
           ) : isAftermath ? (
             <div className="flex flex-wrap items-center justify-center gap-2">
-              {telemetry.carpathiaStage === 'waiting' && (
+              {telemetry.carpathiaSunk && (
+                <div className="bg-[#450a0a]/92 border border-[#ef4444]/85 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#fecaca]">
+                  ▲ RMS CARPATHIA STRUCK — BREAKING APART &amp; SINKING
+                </div>
+              )}
+
+              {!telemetry.carpathiaSunk && telemetry.carpathiaStage === 'waiting' && (
                 <>
-                  {telemetry.warshipRescuing ? (
+                  {telemetry.warshipsIntact > 0 && telemetry.warshipRescuing ? (
                     <div className="bg-[#071f24]/92 border border-[#34d399]/70 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5 tabular-nums">
                       <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
                       ESCORT WARSHIP RESCUING · {telemetry.warshipSurvivors} / 356 ABOARD ({telemetry.warshipBoatsRecovered} / 8 BOATS)
                     </div>
-                  ) : (
+                  ) : telemetry.warshipsIntact > 0 ? (
                     <div className="bg-[#071829]/92 border border-[#38bdf8]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#bae6fd] flex items-center gap-1.5 tabular-nums">
                       <Anchor className="w-3.5 h-3.5 text-[#38bdf8]" />
                       ESCORT WARSHIP CLOSING IN · LIFEBOATS: {telemetry.lifeboatsLaunched} / 16
+                    </div>
+                  ) : (
+                    <div className="bg-[#450a0a]/92 border border-[#ef4444]/85 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#fecaca] tabular-nums">
+                      ▲ ESCORT WARSHIPS LOST — LIFEBOATS STANDING BY ({telemetry.lifeboatsLaunched} / 16)
                     </div>
                   )}
                   <div className="bg-[#070e18]/92 border border-[#c99c43]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#e6c373] flex items-center gap-1.5 tabular-nums">
@@ -205,7 +215,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </>
               )}
 
-              {telemetry.carpathiaStage === 'approaching' && (
+              {!telemetry.carpathiaSunk && telemetry.carpathiaStage === 'approaching' && (
                 <>
                   <div className="bg-[#071829]/92 border border-[#38bdf8]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#bae6fd] flex items-center gap-1.5 tabular-nums">
                     <Anchor className="w-3.5 h-3.5 text-[#38bdf8]" />
@@ -217,11 +227,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </>
               )}
 
-              {telemetry.carpathiaStage === 'boarding' && (
+              {!telemetry.carpathiaSunk && telemetry.carpathiaStage === 'boarding' && (
                 <>
                   <div className="bg-[#071f24]/92 border border-[#34d399]/70 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5">
                     <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
-                    JOINT RESCUE IN PROGRESS — WARSHIP &amp; CARPATHIA BOARDING
+                    {telemetry.warshipsIntact > 0 ? 'JOINT RESCUE IN PROGRESS — WARSHIP & CARPATHIA BOARDING' : 'RMS CARPATHIA BOARDING SURVIVORS'}
                   </div>
                   <div className="bg-[#071526]/92 border border-[#c99c43]/60 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#f3d999] tabular-nums">
                     SURVIVORS ABOARD: {telemetry.survivorsRescued} / 712 · BOATS: {telemetry.boatsRecovered} / 16
@@ -229,11 +239,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </>
               )}
 
-              {telemetry.carpathiaStage === 'complete' && (
+              {!telemetry.carpathiaSunk && telemetry.carpathiaStage === 'complete' && (
                 <>
                   <div className="bg-[#071f1a]/92 border border-[#34d399]/75 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5">
                     <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
-                    RESCUE COMPLETE — 712 SURVIVORS ABOARD WARSHIP &amp; CARPATHIA
+                    RESCUE COMPLETE — 712 SURVIVORS ABOARD {telemetry.warshipsIntact > 0 ? 'WARSHIP & CARPATHIA' : 'RMS CARPATHIA'}
                   </div>
                   <div className="bg-[#071526]/92 border border-[#c99c43]/55 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#e6c373] tabular-nums">
                     ALL {telemetry.boatsRecovered} LIFEBOATS RECOVERED

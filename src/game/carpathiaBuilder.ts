@@ -2,8 +2,13 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ProceduralTextureSet } from './textures';
 
+export const CARPATHIA_BREAK_Z = 10.0;
+
 export interface CarpathiaRig {
   root: THREE.Group;
+  hullMeshGroup: THREE.Group;
+  bowGroup: THREE.Group;
+  sternGroup: THREE.Group;
   boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>;
   setRescueState: (
     time: number,
@@ -11,6 +16,8 @@ export interface CarpathiaRig {
     laddersDeployed: boolean,
     searchlightSweep: boolean,
   ) => void;
+  setBreakupVisual: (broken: boolean, emberPower?: number) => void;
+  reset: () => void;
   dispose: () => void;
 }
 
@@ -220,25 +227,37 @@ function buildCurvedHouse(
   zMin: number,
   zMax: number,
   height: number,
-  curveLen = 0.65,
+  curveLenFore = 0.65,
+  curveLenAft = curveLenFore,
 ): THREE.BufferGeometry {
   const shape = new THREE.Shape();
   const yFront = -zMin;
   const yBack = -zMax;
-  shape.moveTo(-halfWidth, yFront - curveLen);
-  shape.quadraticCurveTo(-halfWidth, yFront, 0, yFront);
-  shape.quadraticCurveTo(halfWidth, yFront, halfWidth, yFront - curveLen);
-  shape.lineTo(halfWidth, yBack + curveLen);
-  shape.quadraticCurveTo(halfWidth, yBack, 0, yBack);
-  shape.quadraticCurveTo(-halfWidth, yBack, -halfWidth, yBack + curveLen);
+  if (curveLenFore > 0.01) {
+    shape.moveTo(-halfWidth, yFront - curveLenFore);
+    shape.quadraticCurveTo(-halfWidth, yFront, 0, yFront);
+    shape.quadraticCurveTo(halfWidth, yFront, halfWidth, yFront - curveLenFore);
+  } else {
+    shape.moveTo(-halfWidth, yFront);
+    shape.lineTo(halfWidth, yFront);
+  }
+  if (curveLenAft > 0.01) {
+    shape.lineTo(halfWidth, yBack + curveLenAft);
+    shape.quadraticCurveTo(halfWidth, yBack, 0, yBack);
+    shape.quadraticCurveTo(-halfWidth, yBack, -halfWidth, yBack + curveLenAft);
+  } else {
+    shape.lineTo(halfWidth, yBack);
+    shape.lineTo(-halfWidth, yBack);
+  }
   shape.closePath();
 
+  const isSplitFace = curveLenFore <= 0.01 || curveLenAft <= 0.01;
   const geo = new THREE.ExtrudeGeometry(shape, {
     depth: height,
-    bevelEnabled: true,
-    bevelThickness: 0.05,
-    bevelSize: 0.05,
-    bevelSegments: 2,
+    bevelEnabled: !isSplitFace,
+    bevelThickness: isSplitFace ? 0 : 0.05,
+    bevelSize: isSplitFace ? 0 : 0.05,
+    bevelSegments: isSplitFace ? 1 : 2,
     curveSegments: 12,
   });
   geo.rotateX(-Math.PI / 2);
@@ -265,6 +284,23 @@ export function buildCarpathiaShip(
 ): CarpathiaRig {
   const root = new THREE.Group();
   root.visible = false;
+
+  const hullMeshGroup = new THREE.Group();
+  root.add(hullMeshGroup);
+
+  const bowGroup = new THREE.Group();
+  bowGroup.position.set(0, 0, CARPATHIA_BREAK_Z);
+  hullMeshGroup.add(bowGroup);
+  const bowContent = new THREE.Group();
+  bowContent.position.set(0, 0, -CARPATHIA_BREAK_Z);
+  bowGroup.add(bowContent);
+
+  const sternGroup = new THREE.Group();
+  sternGroup.position.set(0, 0, CARPATHIA_BREAK_Z);
+  hullMeshGroup.add(sternGroup);
+  const sternContent = new THREE.Group();
+  sternContent.position.set(0, 0, -CARPATHIA_BREAK_Z);
+  sternGroup.add(sternContent);
 
   const geometries: THREE.BufferGeometry[] = [];
   const materials: THREE.Material[] = [];
@@ -343,21 +379,53 @@ export function buildCarpathiaShip(
     }),
   );
   const stayMat = trackMat(new THREE.MeshBasicMaterial({ color: 0x4b5868 }));
+  const tornSteelMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1c222a,
+      roughness: 0.72,
+      metalness: 0.65,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const tornRustMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x4d251a,
+      roughness: 0.86,
+      metalness: 0.35,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const breakEmberMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xff9f45,
+      emissive: 0xff5a1f,
+      emissiveIntensity: 0,
+      roughness: 0.4,
+      side: THREE.DoubleSide,
+    }),
+  );
 
   // =========================================================================
-  // 1. LOFTED 170m CUNARD HULL, WEATHER DECKS, RAILINGS & SUPERSTRUCTURE
+  // 1. LOFTED 170m CUNARD HULL (SPLIT AT CARPATHIA_BREAK_Z), DECKS & SUPERSTRUCTURE
   // =========================================================================
-  const zStations = [
-    -85, -80, -72, -62, -50, -48.2, -48, -40, -30.2, -30, -16, 0, 18, 36, 51.8, 52, 66, 77, 85,
+  const fwdHullZ = [
+    -85, -80, -72, -62, -50, -48.2, -48, -40, -30.2, -30, -16, 0, CARPATHIA_BREAK_Z,
   ];
-  const upperHull = new THREE.Mesh(trackGeo(buildLoftedHull(zStations, 7, 0.36, 1.0)), steelHullMat);
-  upperHull.castShadow = !isSoftwareGl;
-  upperHull.receiveShadow = true;
-  root.add(upperHull);
+  const aftHullZ = [CARPATHIA_BREAK_Z, 18, 36, 51.8, 52, 66, 77, 85];
 
-  const lowerHull = new THREE.Mesh(trackGeo(buildLoftedHull(zStations, 4, 0.0, 0.37)), antiFoulMat);
-  lowerHull.scale.set(0.999, 1, 0.9995);
-  root.add(lowerHull);
+  for (const [stations, targetGrp] of [
+    [fwdHullZ, bowContent],
+    [aftHullZ, sternContent],
+  ] as const) {
+    const upperHull = new THREE.Mesh(trackGeo(buildLoftedHull(stations, 7, 0.36, 1.0)), steelHullMat);
+    upperHull.castShadow = !isSoftwareGl;
+    upperHull.receiveShadow = true;
+    targetGrp.add(upperHull);
+
+    const lowerHull = new THREE.Mesh(trackGeo(buildLoftedHull(stations, 4, 0.0, 0.37)), antiFoulMat);
+    lowerHull.scale.set(0.999, 1, 0.9995);
+    targetGrp.add(lowerHull);
+  }
 
   // Bow gold "CARPATHIA" nameplates flush against port & starboard flare
   const carpNameMat = trackMat(
@@ -380,7 +448,7 @@ export function buildCarpathiaShip(
     const plate = new THREE.Mesh(nameGeo, carpNameMat);
     plate.position.set(side * ((cb1 + cb2) * 0.5 + 0.06), 6.2, -70.0);
     plate.rotation.y = (side > 0 ? Math.PI / 2 : -Math.PI / 2) + side * carpBowYaw;
-    root.add(plate);
+    bowContent.add(plate);
   }
 
   // Hull-conforming Forecastle, Forward Well Deck, Midships Weather Deck & Poop Teak Decks
@@ -388,44 +456,58 @@ export function buildCarpathiaShip(
     trackGeo(buildCarpathiaWeatherDeck([-85, -80, -72, -62, -52, -48], 0.05, 0.4, -0.02)),
     teakMat,
   );
-  root.add(foreDeck);
+  bowContent.add(foreDeck);
 
   const fwdWellDeck = new THREE.Mesh(
     trackGeo(buildCarpathiaWeatherDeck([-48, -43, -37, -30], 0.06, 0.38, -0.02)),
     teakMat,
   );
-  root.add(fwdWellDeck);
+  bowContent.add(fwdWellDeck);
 
-  const mainPromenade = new THREE.Mesh(
-    trackGeo(buildCarpathiaWeatherDeck([-30, -16, 0, 18, 36, 52], 0.06, 0.42, 0.0)),
+  const mainPromenadeBow = new THREE.Mesh(
+    trackGeo(buildCarpathiaWeatherDeck([-30, -16, 0, CARPATHIA_BREAK_Z], 0.06, 0.42, 0.0)),
     teakMat,
   );
-  root.add(mainPromenade);
+  bowContent.add(mainPromenadeBow);
+
+  const mainPromenadeStern = new THREE.Mesh(
+    trackGeo(buildCarpathiaWeatherDeck([CARPATHIA_BREAK_Z, 18, 36, 52], 0.06, 0.42, 0.0)),
+    teakMat,
+  );
+  sternContent.add(mainPromenadeStern);
 
   const poopDeck = new THREE.Mesh(
     trackGeo(buildCarpathiaWeatherDeck([52, 60, 70, 79, 85], 0.06, 0.4, -0.02)),
     teakMat,
   );
-  root.add(poopDeck);
+  sternContent.add(poopDeck);
 
-  // Break Bulkhead Walls sealing Forecastle-to-Well (-48), Well-to-Midships (-30) & Midships-to-Poop (+52)
+  // Break Bulkhead Walls
   const foreBreakWall = new THREE.Mesh(trackGeo(buildCurvedHouse(8.4, -48.4, -47.6, 2.35, 0.15)), whiteMat);
   foreBreakWall.position.y = 5.35;
-  root.add(foreBreakWall);
+  bowContent.add(foreBreakWall);
 
   const wellHatchCoaming = new THREE.Mesh(trackGeo(buildCurvedHouse(2.5, -42.5, -35.5, 0.72, 0.25)), whiteMat);
   wellHatchCoaming.position.y = 5.42;
-  root.add(wellHatchCoaming);
+  bowContent.add(wellHatchCoaming);
   const wellHatchCover = new THREE.Mesh(trackGeo(buildCurvedHouse(2.3, -42.2, -35.8, 0.2, 0.2)), teakMat);
   wellHatchCover.position.y = 6.14;
-  root.add(wellHatchCover);
+  bowContent.add(wellHatchCover);
 
   const poopBreakWall = new THREE.Mesh(trackGeo(buildCurvedHouse(8.6, 51.6, 52.5, 1.4, 0.15)), whiteMat);
   poopBreakWall.position.y = 5.5;
-  root.add(poopBreakWall);
+  sternContent.add(poopBreakWall);
 
-  // Hull-conforming Perimeter Railings on Forecastle, Well Deck, Boat Deck & Poop
-  const addCarpRailSeg = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => {
+  // Hull-conforming Perimeter Railings
+  const addCarpRailSeg = (
+    targetGrp: THREE.Group,
+    x1: number,
+    y1: number,
+    z1: number,
+    x2: number,
+    y2: number,
+    z2: number,
+  ) => {
     const dx = x2 - x1;
     const dy = y2 - y1;
     const dz = z2 - z1;
@@ -438,10 +520,10 @@ export function buildCarpathiaShip(
       bar.position.set((x1 + x2) * 0.5, (y1 + y2) * 0.5 + off, (z1 + z2) * 0.5);
       bar.rotation.x = Math.PI / 2;
       bar.rotation.z = -Math.atan2(dx, dz);
-      root.add(bar);
+      targetGrp.add(bar);
     }
   };
-  const addCarpHullRail = (zList: number[]) => {
+  const addCarpHullRail = (targetGrp: THREE.Group, zList: number[]) => {
     for (const side of [-1, 1] as const) {
       for (let i = 0; i < zList.length; i++) {
         const z = zList[i];
@@ -450,12 +532,13 @@ export function buildCarpathiaShip(
         const ry = sheerY + 0.06;
         const post = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.045, 0.045, 1.0, 6)), whiteMat);
         post.position.set(rx, ry + 0.5, z <= -82 ? z - 1.25 : z);
-        root.add(post);
+        targetGrp.add(post);
         if (i < zList.length - 1) {
           const nz = zList[i + 1];
           const nxSt = sampleCarpathiaStation(nz);
           const nrx = side * Math.max(0, nxSt.beam * (1 + nxSt.flare) - 0.15);
           addCarpRailSeg(
+            targetGrp,
             rx,
             ry,
             z <= -82 ? z - 1.25 : z,
@@ -467,98 +550,132 @@ export function buildCarpathiaShip(
       }
     }
   };
-  addCarpHullRail([-84.5, -76, -65, -55, -48.3]);
-  addCarpHullRail([-47.5, -39, -30.5]);
-  addCarpHullRail([52.5, 62, 72, 80, 84.5]);
+  addCarpHullRail(bowContent, [-84.5, -76, -65, -55, -48.3]);
+  addCarpHullRail(bowContent, [-47.5, -39, -30.5]);
+  addCarpHullRail(sternContent, [52.5, 62, 72, 80, 84.5]);
 
-  // Midships Superstructure (Bridge Deck, Boat Deck & Promenade Roof)
-  const bHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(8.9, -29.0, 46.0, 2.8, 1.0)), whiteMat);
-  bHouse.position.y = 5.62;
-  bHouse.castShadow = !isSoftwareGl;
-  root.add(bHouse);
+  // Midships Superstructure (Bridge Deck, Boat Deck & Promenade Roof) — seamlessly split at CARPATHIA_BREAK_Z
+  const bHouseBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(8.9, -29.0, CARPATHIA_BREAK_Z, 2.8, 1.0, 0)),
+    whiteMat,
+  );
+  bHouseBow.position.y = 5.62;
+  bHouseBow.castShadow = !isSoftwareGl;
+  bowContent.add(bHouseBow);
 
-  const boatDeckFloor = new THREE.Mesh(trackGeo(buildCurvedHouse(9.35, -29.5, 46.5, 0.26, 1.0)), teakMat);
-  boatDeckFloor.position.y = 8.42;
-  root.add(boatDeckFloor);
+  const bHouseStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(8.9, CARPATHIA_BREAK_Z, 46.0, 2.8, 0, 1.0)),
+    whiteMat,
+  );
+  bHouseStern.position.y = 5.62;
+  bHouseStern.castShadow = !isSoftwareGl;
+  sternContent.add(bHouseStern);
 
-  // Boat Deck Teak-Capped Railings
+  const boatDeckFloorBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(9.35, -29.5, CARPATHIA_BREAK_Z, 0.26, 1.0, 0)),
+    teakMat,
+  );
+  boatDeckFloorBow.position.y = 8.42;
+  bowContent.add(boatDeckFloorBow);
+
+  const boatDeckFloorStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(9.35, CARPATHIA_BREAK_Z, 46.5, 0.26, 0, 1.0)),
+    teakMat,
+  );
+  boatDeckFloorStern.position.y = 8.42;
+  sternContent.add(boatDeckFloorStern);
+
+  // Boat Deck Teak-Capped Railings (split cleanly)
   for (const side of [-1, 1] as const) {
-    addCarpRailSeg(side * 9.2, 8.68, -28.0, side * 9.2, 8.68, 45.0);
+    addCarpRailSeg(bowContent, side * 9.2, 8.68, -28.0, side * 9.2, 8.68, CARPATHIA_BREAK_Z);
+    addCarpRailSeg(sternContent, side * 9.2, 8.68, CARPATHIA_BREAK_Z, side * 9.2, 8.68, 45.0);
     for (let pz = -26; pz <= 44; pz += 7.0) {
       const bPost = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.045, 0.045, 0.98, 6)), whiteMat);
       bPost.position.set(side * 9.2, 9.16, pz);
-      root.add(bPost);
+      (pz <= CARPATHIA_BREAK_Z ? bowContent : sternContent).add(bPost);
     }
   }
 
-  const aHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(7.1, -21.5, 38.5, 2.45, 0.7)), whiteMat);
-  aHouse.position.y = 8.66;
-  root.add(aHouse);
+  const aHouseBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(7.1, -21.5, CARPATHIA_BREAK_Z, 2.45, 0.7, 0)),
+    whiteMat,
+  );
+  aHouseBow.position.y = 8.66;
+  bowContent.add(aHouseBow);
 
-  // Solid Deckhouse Roof above A-House sealing funnel fidley & bridge base cleanly
-  const aDeckRoof = new THREE.Mesh(trackGeo(buildCurvedHouse(7.35, -22.0, 39.0, 0.24, 0.7)), teakMat);
-  aDeckRoof.position.y = 11.1;
-  root.add(aDeckRoof);
+  const aHouseStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(7.1, CARPATHIA_BREAK_Z, 38.5, 2.45, 0, 0.7)),
+    whiteMat,
+  );
+  aHouseStern.position.y = 8.66;
+  sternContent.add(aHouseStern);
 
-  // Wheelhouse, Enclosed Bridge Wing Cabs & Cantilevered Support Knees (z = -20)
+  const aDeckRoofBow = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(7.35, -22.0, CARPATHIA_BREAK_Z, 0.24, 0.7, 0)),
+    teakMat,
+  );
+  aDeckRoofBow.position.y = 11.1;
+  bowContent.add(aDeckRoofBow);
+
+  const aDeckRoofStern = new THREE.Mesh(
+    trackGeo(buildCurvedHouse(7.35, CARPATHIA_BREAK_Z, 39.0, 0.24, 0, 0.7)),
+    teakMat,
+  );
+  aDeckRoofStern.position.y = 11.1;
+  sternContent.add(aDeckRoofStern);
+
+  // Wheelhouse, Enclosed Bridge Wing Cabs & Cantilevered Support Knees (z = -20 -> bowContent)
   const bridgeWingDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(10.8, -23.2, -20.0, 0.28, 0.25)), teakMat);
   bridgeWingDeck.position.y = 11.08;
-  root.add(bridgeWingDeck);
+  bowContent.add(bridgeWingDeck);
 
-  // Support pillars & knees under the forward bridge overhang (-23.2 to -21.5)
   for (const sx of [-6.8, -3.6, 3.6, 6.8]) {
     const sup = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.11, 0.14, 2.65, 8)), whiteMat);
     sup.position.set(sx, 9.85, -22.2);
-    root.add(sup);
+    bowContent.add(sup);
   }
 
   const bridgeHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(4.2, -23.3, -18.5, 2.38, 0.35)), whiteMat);
   bridgeHouse.position.y = 11.32;
-  root.add(bridgeHouse);
+  bowContent.add(bridgeHouse);
 
   const bridgeRoof = new THREE.Mesh(trackGeo(buildCurvedHouse(4.4, -23.5, -18.3, 0.18, 0.35)), teakMat);
   bridgeRoof.position.y = 13.7;
-  root.add(bridgeRoof);
+  bowContent.add(bridgeRoof);
 
-  // Curved glowing bridge windows flush across front face of bridgeHouse
   const bridgeWinCenter = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.6, 0.68, 0.14)), warmGlowMat);
   bridgeWinCenter.position.set(0, 12.65, -23.32);
-  root.add(bridgeWinCenter);
+  bowContent.add(bridgeWinCenter);
 
-  // Searchlight projector pedestal & barrel atop Carpathia's wheelhouse roof
   const slBase = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.22, 0.36, 10)), brassMat);
   slBase.position.set(-4.5, 13.78, -21.0);
-  root.add(slBase);
+  bowContent.add(slBase);
 
   for (const side of [-1, 1] as const) {
-    // Wing front dodger wall spanning seamlessly from bridgeHouse (4.2m) to wing cab (10.75m)
     const wingWall = new THREE.Mesh(trackGeo(buildCurvedHouse(3.3, -23.15, -22.8, 1.12, 0.1)), whiteMat);
     wingWall.position.set(side * 7.45, 11.34, 0);
-    root.add(wingWall);
+    bowContent.add(wingWall);
 
-    // Aft bridge wing railing
-    addCarpRailSeg(side * 4.2, 11.36, -20.1, side * 10.65, 11.36, -20.1);
+    addCarpRailSeg(bowContent, side * 4.2, 11.36, -20.1, side * 10.65, 11.36, -20.1);
 
-    // Enclosed Wing Cab supporting port/starboard navigation lights (no floating spheres!)
     const wingCab = new THREE.Mesh(trackGeo(buildCurvedHouse(0.42, -23.1, -20.1, 1.18, 0.15)), whiteMat);
     wingCab.position.set(side * 10.55, 11.34, 0);
-    root.add(wingCab);
+    bowContent.add(wingCab);
 
     const nav = new THREE.Mesh(
       trackGeo(new THREE.SphereGeometry(0.24, 10, 10)),
       side < 0 ? portRedMat : stbdGreenMat,
     );
     nav.position.set(side * 10.65, 12.62, -22.4);
-    root.add(nav);
+    bowContent.add(nav);
   }
 
   // =========================================================================
   // 2. SINGLE TOWERING CUNARD FUNNEL + FIDLEY CASING + 4 TILTED SCHOONER MASTS
   // =========================================================================
-  // Boiler Fidley Casing anchoring funnel seamlessly onto A-Deck roof
-  const fidleyBase = new THREE.Mesh(trackGeo(buildCurvedHouse(2.9, 1.6, 10.4, 0.95, 0.5)), whiteMat);
+  const fidleyBase = new THREE.Mesh(trackGeo(buildCurvedHouse(2.9, 1.6, 9.9, 0.95, 0.5)), whiteMat);
   fidleyBase.position.y = 11.2;
-  root.add(fidleyBase);
+  bowContent.add(fidleyBase);
 
   const funnelGroup = new THREE.Group();
   funnelGroup.position.set(0, 11.45, 6.0);
@@ -593,14 +710,13 @@ export function buildCarpathiaShip(
   const whistlePipe = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.12, 0.14, 14.8, 8)), brassMat);
   whistlePipe.position.set(0, 6.8, -2.38);
   funnelGroup.add(whistlePipe);
-  root.add(funnelGroup);
+  bowContent.add(funnelGroup);
 
-  // Funnel steel guy wires anchored down to Boat Deck
   for (const [tx, tz, bx, bz] of [
     [-1.8, 4.8, -8.5, 2.0],
     [1.8, 4.8, 8.5, 2.0],
-    [-1.8, 7.6, -8.5, 11.5],
-    [1.8, 7.6, 8.5, 11.5],
+    [-1.8, 7.6, -8.5, 9.8],
+    [1.8, 7.6, 8.5, 9.8],
   ]) {
     const guy = new THREE.Mesh(
       trackGeo(
@@ -614,10 +730,10 @@ export function buildCarpathiaShip(
       ),
       stayMat,
     );
-    root.add(guy);
+    bowContent.add(guy);
   }
 
-  // 4 Tall Cunard Schooner Masts (z = -46, -15, 28, 60) built in tilted MastGroups so yards/lamps/aerials never float
+  // 4 Tall Cunard Schooner Masts (z = -46, -15, 28, 60)
   const mastZList = [-46.0, -15.0, 28.0, 60.0];
   const mastTilt = 0.05;
   const mastGeo = trackGeo(new THREE.CylinderGeometry(0.14, 0.3, 31.6, 12));
@@ -627,6 +743,7 @@ export function buildCarpathiaShip(
 
   for (let m = 0; m < mastZList.length; m++) {
     const mz = mastZList[m];
+    const targetGrp = mz <= CARPATHIA_BREAK_Z ? bowContent : sternContent;
     const baseY = m === 0 ? 5.2 : m === 3 ? 6.4 : 11.1;
     const mastGrp = new THREE.Group();
     mastGrp.position.set(0, baseY, mz);
@@ -652,9 +769,8 @@ export function buildCarpathiaShip(
       mastLamp.position.set(0, 25.0 - baseY, -0.26);
       mastGrp.add(mastLamp);
     }
-    root.add(mastGrp);
+    targetGrp.add(mastGrp);
 
-    // Exact top & mid-mast coordinates along tilted axis for shrouds and wireless aerials
     const topWorldY = baseY + mastLenAboveBase * Math.cos(mastTilt);
     const topWorldZ = mz + mastLenAboveBase * Math.sin(mastTilt);
     mastTops.push(new THREE.Vector3(0, topWorldY, topWorldZ));
@@ -677,9 +793,11 @@ export function buildCarpathiaShip(
         ),
         stayMat,
       );
-      root.add(stay);
+      targetGrp.add(stay);
     }
   }
+
+  const aerialsGroup = new THREE.Group();
   for (const ax of [-0.45, 0.45]) {
     const aerial = new THREE.Mesh(
       trackGeo(
@@ -696,10 +814,11 @@ export function buildCarpathiaShip(
       ),
       stayMat,
     );
-    root.add(aerial);
+    aerialsGroup.add(aerial);
   }
+  bowContent.add(aerialsGroup);
 
-  // Stern Red Ensign Flag (assembled in tilted staff group so flag never separates)
+  // Stern Red Ensign Flag
   const ensignGroup = new THREE.Group();
   ensignGroup.position.set(0, 6.8, 83.8);
   ensignGroup.rotation.x = 0.18;
@@ -719,7 +838,7 @@ export function buildCarpathiaShip(
   ensignFlag.position.set(0.02, 4.4, 1.4);
   ensignFlag.rotation.y = Math.PI / 2;
   ensignGroup.add(ensignFlag);
-  root.add(ensignGroup);
+  sternContent.add(ensignGroup);
 
   // 8 Stowed Cunard Lifeboats in Welin Davits along Boat Deck (z = -10, 4, 18, 32)
   const cBoatHullGeo = trackGeo(buildCurvedHouse(0.85, -2.7, 2.7, 0.65, 0.9));
@@ -731,33 +850,110 @@ export function buildCarpathiaShip(
   const cDavitGeo = trackGeo(new THREE.TubeGeometry(cDavitCurve, 8, 0.07, 6, false));
   for (const side of [-1, 1] as const) {
     for (const lbz of [-10, 4, 18, 32]) {
+      const boatParent = lbz <= CARPATHIA_BREAK_Z ? bowContent : sternContent;
       for (const dz of [-2.3, 2.3]) {
         const dv = new THREE.Mesh(cDavitGeo, whiteMat);
         dv.position.set(side * 8.15, 8.65, lbz + dz);
         dv.scale.x = side;
-        root.add(dv);
+        boatParent.add(dv);
       }
       const chock = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.1, 0.42, 3.6)), teakMat);
       chock.position.set(side * 8.65, 8.85, lbz);
-      root.add(chock);
+      boatParent.add(chock);
 
       const cb = new THREE.Mesh(cBoatHullGeo, whiteMat);
       cb.position.set(side * 8.65, 9.05, lbz);
-      root.add(cb);
+      boatParent.add(cb);
     }
   }
+
+  // =========================================================================
+  // 2B. JAGGED INTERNAL FRACTURE BULKHEADS AT z = CARPATHIA_BREAK_Z
+  // =========================================================================
+  const buildFractureBulkhead = (dirZ: -1 | 1): THREE.Group => {
+    const cap = new THREE.Group();
+    cap.position.set(0, 0, CARPATHIA_BREAK_Z);
+
+    const { beam, sheerY } = sampleCarpathiaStation(CARPATHIA_BREAK_Z);
+    const hullFaceShape = new THREE.Shape();
+    hullFaceShape.moveTo(0, -5.0);
+    hullFaceShape.quadraticCurveTo(beam * 0.85, -3.4, beam * 0.98, 0.8);
+    hullFaceShape.lineTo(beam * 1.02, sheerY);
+    hullFaceShape.lineTo(8.9, sheerY);
+    hullFaceShape.lineTo(8.9, 8.42);
+    hullFaceShape.lineTo(7.1, 8.42);
+    hullFaceShape.lineTo(7.1, 11.1);
+    hullFaceShape.lineTo(-7.1, 11.1);
+    hullFaceShape.lineTo(-7.1, 8.42);
+    hullFaceShape.lineTo(-8.9, 8.42);
+    hullFaceShape.lineTo(-8.9, sheerY);
+    hullFaceShape.lineTo(-beam * 1.02, sheerY);
+    hullFaceShape.lineTo(-beam * 0.98, 0.8);
+    hullFaceShape.quadraticCurveTo(-beam * 0.85, -3.4, 0, -5.0);
+    hullFaceShape.closePath();
+
+    const plate = new THREE.Mesh(trackGeo(new THREE.ShapeGeometry(hullFaceShape)), tornSteelMat);
+    plate.position.z = -dirZ * 0.08;
+    cap.add(plate);
+
+    for (const dy of [-2.2, 0.8, 3.4, 5.65, 8.45, 11.1]) {
+      const w = dy < 6 ? 18.2 : dy < 9 ? 17.6 : 14.0;
+      const slab = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(w, 0.24, 0.95)), tornRustMat);
+      slab.position.set(0, dy, dirZ * 0.2);
+      cap.add(slab);
+    }
+
+    for (let ji = 0; ji < 12; ji++) {
+      const xPos = -8.6 + ji * 1.56;
+      const yPos = -3.4 + ((ji * 5) % 12) * 1.15;
+      const jutLen = 0.55 + ((ji * 11) % 6) * 0.24;
+      const shard = new THREE.Mesh(
+        trackGeo(new THREE.ConeGeometry(0.34 + (ji % 3) * 0.14, jutLen, 4)),
+        ji % 2 === 0 ? tornSteelMat : tornRustMat,
+      );
+      shard.rotation.x = dirZ * (Math.PI / 2 + ((ji % 5) - 2) * 0.14);
+      shard.rotation.z = ((ji % 4) - 1.5) * 0.22;
+      shard.position.set(xPos, yPos, dirZ * (jutLen * 0.45 + 0.1));
+      cap.add(shard);
+    }
+
+    for (const [ex, ey] of [
+      [-3.5, 2.2],
+      [3.5, 2.2],
+      [-4.2, 6.8],
+      [4.2, 6.8],
+    ]) {
+      const ember = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(2.4, 1.2)), breakEmberMat);
+      ember.position.set(ex, ey, dirZ * 0.25);
+      if (dirZ < 0) ember.rotation.y = Math.PI;
+      cap.add(ember);
+    }
+
+    cap.visible = false;
+    return cap;
+  };
+
+  const bowBreakCap = buildFractureBulkhead(1);
+  bowContent.add(bowBreakCap);
+  const sternBreakCap = buildFractureBulkhead(-1);
+  sternContent.add(sternBreakCap);
 
   // =========================================================================
   // 3. WARM PORTHOLES, RESCUE FLOODLIGHTS & 4 BOARDING GANGWAY LADDERS
   // =========================================================================
   const portholeGeo = trackGeo(new THREE.CircleGeometry(0.24, 10));
-  const phCoords: Array<{ x: number; y: number; z: number; ry: number; sx: number }> = [];
+  const phBow: Array<{ x: number; y: number; z: number; ry: number; sx: number }> = [];
+  const phStern: Array<{ x: number; y: number; z: number; ry: number; sx: number }> = [];
+  const pushPh = (p: { x: number; y: number; z: number; ry: number; sx: number }) => {
+    if (p.z <= CARPATHIA_BREAK_Z) phBow.push(p);
+    else phStern.push(p);
+  };
   for (const side of [-1, 1]) {
     for (let z = -66; z <= 74; z += 4.5) {
       const { beam, sheerY } = sampleCarpathiaStation(z);
       const { beam: beamNext } = sampleCarpathiaStation(z + 1.5);
       const slopeAngle = Math.atan2((beamNext - beam) * side, 1.5);
-      phCoords.push({
+      pushPh({
         x: side * (beam * 0.99 + 0.05),
         y: sheerY - 1.5,
         z,
@@ -766,7 +962,7 @@ export function buildCarpathiaShip(
       });
     }
     for (let z = -27; z <= 44; z += 3.2) {
-      phCoords.push({
+      pushPh({
         x: side * 8.97,
         y: 7.12,
         z,
@@ -775,7 +971,7 @@ export function buildCarpathiaShip(
       });
     }
     for (let z = -20; z <= 37; z += 3.2) {
-      phCoords.push({
+      pushPh({
         x: side * 7.17,
         y: 9.88,
         z,
@@ -784,32 +980,37 @@ export function buildCarpathiaShip(
       });
     }
   }
-  const phInst = new THREE.InstancedMesh(portholeGeo, warmGlowMat, phCoords.length);
   const dummy = new THREE.Object3D();
-  for (let i = 0; i < phCoords.length; i++) {
-    const p = phCoords[i];
-    dummy.position.set(p.x, p.y, p.z);
-    dummy.rotation.set(0, p.ry, 0);
-    dummy.scale.set(p.sx, 1, 1);
-    dummy.updateMatrix();
-    phInst.setMatrixAt(i, dummy.matrix);
+  for (const [list, targetGrp] of [
+    [phBow, bowContent],
+    [phStern, sternContent],
+  ] as const) {
+    if (list.length === 0) continue;
+    const phInst = new THREE.InstancedMesh(portholeGeo, warmGlowMat, list.length);
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      dummy.position.set(p.x, p.y, p.z);
+      dummy.rotation.set(0, p.ry, 0);
+      dummy.scale.set(p.sx, 1, 1);
+      dummy.updateMatrix();
+      phInst.setMatrixAt(i, dummy.matrix);
+    }
+    phInst.instanceMatrix.needsUpdate = true;
+    targetGrp.add(phInst);
   }
-  phInst.instanceMatrix.needsUpdate = true;
-  root.add(phInst);
 
-  // Deck Illumination + Rescue Searchlight Sweeping Waves
   const deckGlowLight = new THREE.PointLight(0xffbe73, 12.0, 120, 1.25);
   deckGlowLight.position.set(0, 14.5, 6);
-  root.add(deckGlowLight);
+  bowContent.add(deckGlowLight);
 
   const rescueTarget = new THREE.Object3D();
   rescueTarget.position.set(-45, 0, 10);
-  root.add(rescueTarget);
+  bowContent.add(rescueTarget);
 
   const rescueSpot = new THREE.SpotLight(0xedf7ff, 120, 260, Math.PI / 8, 0.55, 1.1);
   rescueSpot.position.set(-4.5, 14.0, -21.0);
   rescueSpot.target = rescueTarget;
-  root.add(rescueSpot);
+  bowContent.add(rescueSpot);
 
   // 4 Illuminated Side Boarding Jacob's Ladders / Gangways (2 Port, 2 Starboard)
   const boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }> = [
@@ -818,8 +1019,10 @@ export function buildCarpathiaShip(
     { x: 10.8, y: 0.4, z: -8.0, side: 1 },
     { x: 10.8, y: 0.4, z: 22.0, side: 1 },
   ];
-  const laddersGroup = new THREE.Group();
-  laddersGroup.visible = false;
+  const bowLaddersGroup = new THREE.Group();
+  const sternLaddersGroup = new THREE.Group();
+  bowLaddersGroup.visible = false;
+  sternLaddersGroup.visible = false;
   const ropeRailGeo = trackGeo(new THREE.CylinderGeometry(0.035, 0.035, 6.2, 6));
   const rungGeo = trackGeo(new THREE.BoxGeometry(0.18, 0.06, 0.95));
   const stageGeo = trackGeo(new THREE.BoxGeometry(1.1, 0.14, 1.6));
@@ -829,7 +1032,6 @@ export function buildCarpathiaShip(
     const g = new THREE.Group();
     g.position.set(st.side * 9.85, 3.2, st.z);
 
-    // Upper deck-to-ladder landing bridge spanning from promenade deck edge out to the ladder top
     const upperLanding = new THREE.Mesh(upperLandingGeo, teakMat);
     upperLanding.position.set(-st.side * 0.4, 2.48, 0);
     g.add(upperLanding);
@@ -852,12 +1054,13 @@ export function buildCarpathiaShip(
     lamp.position.set(st.side * 0.55, -1.65, 0.65);
     g.add(lamp);
 
-    laddersGroup.add(g);
+    (st.z <= CARPATHIA_BREAK_Z ? bowLaddersGroup : sternLaddersGroup).add(g);
   }
-  root.add(laddersGroup);
+  bowContent.add(bowLaddersGroup);
+  sternContent.add(sternLaddersGroup);
 
   // =========================================================================
-  // 4. CARPATHIA CREW + 160 RESCUED TITANIC SURVIVORS IN LIFEJACKETS (InstancedMesh)
+  // 4. CARPATHIA CREW + 160 RESCUED TITANIC SURVIVORS (SPLIT BOW & STERN)
   // =========================================================================
   const personTorso = trackGeo(new THREE.CylinderGeometry(0.16, 0.14, 0.68, 8));
   personTorso.translate(0, 1.08, 0);
@@ -877,86 +1080,102 @@ export function buildCarpathiaShip(
   const vestMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xefe3c8, roughness: 0.85 }));
 
   const MAX_SURVIVOR_FIGURES = 160;
-  const survivorSpots: Array<{
+  interface CarpSurvivorSpot {
     x: number;
     y: number;
     z: number;
     ry: number;
     phase: number;
     onLadder?: number;
-  }> = [];
+    orderIdx: number;
+    isStern: boolean;
+    localIdx: number;
+  }
+  const bowSurvSpots: CarpSurvivorSpot[] = [];
+  const sternSurvSpots: CarpSurvivorSpot[] = [];
 
   for (let i = 0; i < MAX_SURVIVOR_FIGURES; i++) {
     const isClimbing = i % 10 === 0;
     const side: -1 | 1 = i % 2 === 0 ? -1 : 1;
+    let spotBase: { x: number; y: number; z: number; ry: number; phase: number; onLadder?: number };
     if (isClimbing) {
       const st = boardingStationsLocal[i % boardingStationsLocal.length];
-      survivorSpots.push({
+      spotBase = {
         x: st.side * 10.15,
         y: 1.2 + ((i * 7) % 5) * 0.9,
         z: st.z + ((i % 3) - 1) * 0.25,
         ry: st.side > 0 ? Math.PI / 2 : -Math.PI / 2,
         phase: i * 0.9,
         onLadder: i % boardingStationsLocal.length,
-      });
+      };
     } else if (i % 3 === 0) {
-      // Boat Deck lining railings (y = 8.68 flush on boatDeckFloor)
-      survivorSpots.push({
+      spotBase = {
         x: side * (7.6 + ((i * 13) % 13) * 0.1),
         y: 8.68,
         z: -22 + ((i * 19) % 62),
         ry: side > 0 ? -Math.PI / 2 : Math.PI / 2,
         phase: i * 1.3,
-      });
+      };
     } else {
-      // Main Promenade & Weather deck (y = 5.66 flush on mainPromenade)
-      survivorSpots.push({
+      spotBase = {
         x: side * (7.2 + ((i * 11) % 17) * 0.1),
         y: 5.66,
         z: -28 + ((i * 23) % 74),
         ry: side > 0 ? -Math.PI / 2 : Math.PI / 2,
         phase: i * 1.1,
-      });
+      };
     }
+    const isStern = spotBase.z > CARPATHIA_BREAK_Z;
+    const targetArr = isStern ? sternSurvSpots : bowSurvSpots;
+    targetArr.push({
+      ...spotBase,
+      orderIdx: i,
+      isStern,
+      localIdx: targetArr.length,
+    });
   }
 
-  const survBodyInst = new THREE.InstancedMesh(bodyGeo, bodyMat, MAX_SURVIVOR_FIGURES);
-  const survHeadInst = new THREE.InstancedMesh(headGeo, headMat, MAX_SURVIVOR_FIGURES);
-  const survVestInst = new THREE.InstancedMesh(vestGeo, vestMat, MAX_SURVIVOR_FIGURES);
-  survBodyInst.frustumCulled = false;
-  survHeadInst.frustumCulled = false;
-  survVestInst.frustumCulled = false;
+  const bowSurvBodyInst = new THREE.InstancedMesh(bodyGeo, bodyMat, bowSurvSpots.length);
+  const bowSurvHeadInst = new THREE.InstancedMesh(headGeo, headMat, bowSurvSpots.length);
+  const bowSurvVestInst = new THREE.InstancedMesh(vestGeo, vestMat, bowSurvSpots.length);
+  const sternSurvBodyInst = new THREE.InstancedMesh(bodyGeo, bodyMat, sternSurvSpots.length);
+  const sternSurvHeadInst = new THREE.InstancedMesh(headGeo, headMat, sternSurvSpots.length);
+  const sternSurvVestInst = new THREE.InstancedMesh(vestGeo, vestMat, sternSurvSpots.length);
+
+  for (const inst of [
+    bowSurvBodyInst,
+    bowSurvHeadInst,
+    bowSurvVestInst,
+    sternSurvBodyInst,
+    sternSurvHeadInst,
+    sternSurvVestInst,
+  ]) {
+    inst.frustumCulled = false;
+  }
 
   const coatColors = [0x1c2430, 0x3a2a22, 0x5c232d, 0x243e4d, 0x4b3d57, 0x26443b, 0x8c7355];
   const tmpCol = new THREE.Color();
-  for (let i = 0; i < MAX_SURVIVOR_FIGURES; i++) {
-    tmpCol.setHex(coatColors[i % coatColors.length]);
-    survBodyInst.setColorAt(i, tmpCol);
-    survBodyInst.setMatrixAt(i, _zeroMat);
-    survHeadInst.setMatrixAt(i, _zeroMat);
-    survVestInst.setMatrixAt(i, _zeroMat);
+  for (const [arr, bInst, hInst, vInst] of [
+    [bowSurvSpots, bowSurvBodyInst, bowSurvHeadInst, bowSurvVestInst],
+    [sternSurvSpots, sternSurvBodyInst, sternSurvHeadInst, sternSurvVestInst],
+  ] as const) {
+    for (let i = 0; i < arr.length; i++) {
+      tmpCol.setHex(coatColors[arr[i].orderIdx % coatColors.length]);
+      bInst.setColorAt(i, tmpCol);
+      bInst.setMatrixAt(i, _zeroMat);
+      hInst.setMatrixAt(i, _zeroMat);
+      vInst.setMatrixAt(i, _zeroMat);
+    }
+    if (bInst.instanceColor) bInst.instanceColor.needsUpdate = true;
+    bInst.instanceMatrix.needsUpdate = true;
+    hInst.instanceMatrix.needsUpdate = true;
+    vInst.instanceMatrix.needsUpdate = true;
   }
-  if (survBodyInst.instanceColor) survBodyInst.instanceColor.needsUpdate = true;
-  survBodyInst.instanceMatrix.needsUpdate = true;
-  survHeadInst.instanceMatrix.needsUpdate = true;
-  survVestInst.instanceMatrix.needsUpdate = true;
 
-  root.add(survBodyInst);
-  root.add(survHeadInst);
-  root.add(survVestInst);
+  bowContent.add(bowSurvBodyInst, bowSurvHeadInst, bowSurvVestInst);
+  sternContent.add(sternSurvBodyInst, sternSurvHeadInst, sternSurvVestInst);
 
-  // Carpathia's own 18 visible deck crewmen always standing flush on bridge wings, bow & gangways
-  const crewCount = 18;
-  const crewBodyInst = new THREE.InstancedMesh(bodyGeo, bodyMat, crewCount);
-  const crewHeadInst = new THREE.InstancedMesh(headGeo, headMat, crewCount);
-  crewBodyInst.frustumCulled = false;
-  crewHeadInst.frustumCulled = false;
-  tmpCol.setHex(0x131d2f);
-  for (let i = 0; i < crewCount; i++) {
-    crewBodyInst.setColorAt(i, tmpCol);
-  }
-  if (crewBodyInst.instanceColor) crewBodyInst.instanceColor.needsUpdate = true;
-
+  // Carpathia's own 18 visible deck crewmen split across bow & stern halves
   const crewSpots: Array<[number, number, number, number]> = [
     [-8.8, 11.36, -21.5, -Math.PI / 2],
     [8.8, 11.36, -21.5, Math.PI / 2],
@@ -977,18 +1196,31 @@ export function buildCarpathiaShip(
     [8.6, 8.68, -4.0, Math.PI / 2],
     [8.6, 8.68, 20.0, Math.PI / 2],
   ];
-  for (let i = 0; i < crewSpots.length; i++) {
-    const [cx, cy, cz, ry] = crewSpots[i];
-    _euler.set(0, ry, 0);
-    _qRot.setFromEuler(_euler);
-    _mat4.compose(_vPos.set(cx, cy, cz), _qRot, _vScale.set(1, 1, 1));
-    crewBodyInst.setMatrixAt(i, _mat4);
-    crewHeadInst.setMatrixAt(i, _mat4);
+  const bowCrew = crewSpots.filter((c) => c[2] <= CARPATHIA_BREAK_Z);
+  const sternCrew = crewSpots.filter((c) => c[2] > CARPATHIA_BREAK_Z);
+  tmpCol.setHex(0x131d2f);
+  for (const [list, targetGrp] of [
+    [bowCrew, bowContent],
+    [sternCrew, sternContent],
+  ] as const) {
+    const cBody = new THREE.InstancedMesh(bodyGeo, bodyMat, list.length);
+    const cHead = new THREE.InstancedMesh(headGeo, headMat, list.length);
+    cBody.frustumCulled = false;
+    cHead.frustumCulled = false;
+    for (let i = 0; i < list.length; i++) {
+      const [cx, cy, cz, ry] = list[i];
+      cBody.setColorAt(i, tmpCol);
+      _euler.set(0, ry, 0);
+      _qRot.setFromEuler(_euler);
+      _mat4.compose(_vPos.set(cx, cy, cz), _qRot, _vScale.set(1, 1, 1));
+      cBody.setMatrixAt(i, _mat4);
+      cHead.setMatrixAt(i, _mat4);
+    }
+    if (cBody.instanceColor) cBody.instanceColor.needsUpdate = true;
+    cBody.instanceMatrix.needsUpdate = true;
+    cHead.instanceMatrix.needsUpdate = true;
+    targetGrp.add(cBody, cHead);
   }
-  crewBodyInst.instanceMatrix.needsUpdate = true;
-  crewHeadInst.instanceMatrix.needsUpdate = true;
-  root.add(crewBodyInst);
-  root.add(crewHeadInst);
 
   const setRescueState = (
     time: number,
@@ -996,7 +1228,8 @@ export function buildCarpathiaShip(
     laddersDeployed: boolean,
     searchlightSweep: boolean,
   ) => {
-    laddersGroup.visible = laddersDeployed;
+    bowLaddersGroup.visible = laddersDeployed;
+    sternLaddersGroup.visible = laddersDeployed;
 
     if (searchlightSweep) {
       const sweepZ = 10 + Math.sin(time * 0.75) * 42;
@@ -1010,42 +1243,77 @@ export function buildCarpathiaShip(
     const visibleCount = Math.round(
       THREE.MathUtils.clamp(boardedRatio, 0, 1) * MAX_SURVIVOR_FIGURES,
     );
-    for (let i = 0; i < MAX_SURVIVOR_FIGURES; i++) {
-      if (i >= visibleCount) {
-        survBodyInst.setMatrixAt(i, _zeroMat);
-        survHeadInst.setMatrixAt(i, _zeroMat);
-        survVestInst.setMatrixAt(i, _zeroMat);
-      } else {
-        const sp = survivorSpots[i];
-        const swayY = Math.sin(time * 1.4 + sp.phase) * 0.015;
-        let climbOffset = 0;
-        if (sp.onLadder !== undefined && laddersDeployed) {
-          climbOffset = ((time * 0.55 + sp.phase) % 1) * 2.2;
+    for (const [arr, bInst, hInst, vInst] of [
+      [bowSurvSpots, bowSurvBodyInst, bowSurvHeadInst, bowSurvVestInst],
+      [sternSurvSpots, sternSurvBodyInst, sternSurvHeadInst, sternSurvVestInst],
+    ] as const) {
+      for (let i = 0; i < arr.length; i++) {
+        const sp = arr[i];
+        if (sp.orderIdx >= visibleCount) {
+          bInst.setMatrixAt(i, _zeroMat);
+          hInst.setMatrixAt(i, _zeroMat);
+          vInst.setMatrixAt(i, _zeroMat);
+        } else {
+          const swayY = Math.sin(time * 1.4 + sp.phase) * 0.015;
+          let climbOffset = 0;
+          if (sp.onLadder !== undefined && laddersDeployed) {
+            climbOffset = ((time * 0.55 + sp.phase) % 1) * 2.2;
+          }
+          _euler.set(0, sp.ry + Math.sin(time * 0.8 + sp.phase) * 0.15, 0);
+          _qRot.setFromEuler(_euler);
+          _mat4.compose(
+            _vPos.set(sp.x, sp.y + swayY + climbOffset, sp.z),
+            _qRot,
+            _vScale.set(1, 1, 1),
+          );
+          bInst.setMatrixAt(i, _mat4);
+          hInst.setMatrixAt(i, _mat4);
+          vInst.setMatrixAt(i, _mat4);
         }
-        _euler.set(0, sp.ry + Math.sin(time * 0.8 + sp.phase) * 0.15, 0);
-        _qRot.setFromEuler(_euler);
-        _mat4.compose(
-          _vPos.set(sp.x, sp.y + swayY + climbOffset, sp.z),
-          _qRot,
-          _vScale.set(1, 1, 1),
-        );
-        survBodyInst.setMatrixAt(i, _mat4);
-        survHeadInst.setMatrixAt(i, _mat4);
-        survVestInst.setMatrixAt(i, _mat4);
       }
+      bInst.instanceMatrix.needsUpdate = true;
+      hInst.instanceMatrix.needsUpdate = true;
+      vInst.instanceMatrix.needsUpdate = true;
     }
-    survBodyInst.instanceMatrix.needsUpdate = true;
-    survHeadInst.instanceMatrix.needsUpdate = true;
-    survVestInst.instanceMatrix.needsUpdate = true;
+  };
+
+  const setBreakupVisual = (broken: boolean, emberPower = 0) => {
+    bowBreakCap.visible = broken;
+    sternBreakCap.visible = broken;
+    aerialsGroup.visible = !broken;
+    breakEmberMat.emissiveIntensity = broken ? THREE.MathUtils.clamp(emberPower, 0, 1.5) : 0;
+    if (broken && emberPower <= 0.15) {
+      warmGlowMat.emissiveIntensity = 0.2;
+      deckGlowLight.intensity = 1.5;
+      rescueSpot.intensity = 10;
+    }
+  };
+
+  const reset = () => {
+    hullMeshGroup.position.set(0, 0, 0);
+    hullMeshGroup.rotation.set(0, 0, 0);
+    bowGroup.position.set(0, 0, CARPATHIA_BREAK_Z);
+    bowGroup.rotation.set(0, 0, 0);
+    sternGroup.position.set(0, 0, CARPATHIA_BREAK_Z);
+    sternGroup.rotation.set(0, 0, 0);
+    warmGlowMat.emissiveIntensity = 1.9;
+    deckGlowLight.intensity = 12.0;
+    setBreakupVisual(false, 0);
   };
 
   return {
     root,
+    hullMeshGroup,
+    bowGroup,
+    sternGroup,
     boardingStationsLocal,
     setRescueState,
+    setBreakupVisual,
+    reset,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());
     },
   };
 }
+

@@ -32,6 +32,8 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   warshipRescuing: false,
   warshipSurvivors: 0,
   warshipBoatsRecovered: 0,
+  warshipsIntact: 2,
+  carpathiaSunk: false,
   activeSubmarines: 0,
   submarinesSunk: 0,
   focusCarpathia: false,

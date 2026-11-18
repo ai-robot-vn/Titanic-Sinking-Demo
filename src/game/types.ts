@@ -249,6 +249,8 @@ export interface TelemetrySnapshot {
   warshipBoatsRecovered: number;
   activeSubmarines: number;
   submarinesSunk: number;
+  warshipsIntact: number;
+  carpathiaSunk: boolean;
   focusCarpathia: boolean;
   aftermathFocus: AftermathFocusTarget;
   inHarborZone: boolean;
