@@ -6,6 +6,8 @@ export interface OceanUniforms {
   uShipForward: { value: THREE.Vector2 };
   uShipSpeed: { value: number };
   uNightMix: { value: number };
+  uCameraPos: { value: THREE.Vector3 };
+  uUnderwaterMix: { value: number };
 }
 
 export interface OceanAndSkyRig {
@@ -20,7 +22,15 @@ export interface OceanAndSkyRig {
     speedKnots: number,
     nightMix?: number,
   ) => void;
+  updateCameraView: (camPos: THREE.Vector3, underwaterMix: number) => void;
   dispose: () => void;
+}
+
+export function sampleOceanWaveHeight(x: number, z: number, time: number): number {
+  const w1 = Math.sin(x * 0.052 + time * 1.15) * Math.cos(z * 0.046 + time * 0.85);
+  const w2 = Math.sin((x * 0.72 + z * 0.58) * 0.115 - time * 1.75);
+  const w3 = Math.cos((x * -0.48 + z * 0.86) * 0.21 + time * 2.15);
+  return w1 * 0.44 + w2 * 0.20 + w3 * 0.08;
 }
 
 export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
@@ -30,6 +40,8 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     uShipForward: { value: new THREE.Vector2(0, -1) },
     uShipSpeed: { value: 0 },
     uNightMix: { value: 1 },
+    uCameraPos: { value: new THREE.Vector3(0, 15, 0) },
+    uUnderwaterMix: { value: 0 },
   };
 
   const oceanSize = 2300;
@@ -40,8 +52,10 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
   const oceanMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.11,
-    metalness: 0.42,
-    envMapIntensity: 1.45,
+    metalness: 0.36,
+    envMapIntensity: 1.4,
+    transparent: true,
+    depthWrite: false,
     side: THREE.DoubleSide,
   });
 
@@ -51,6 +65,8 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     shader.uniforms.uShipForward = uniforms.uShipForward;
     shader.uniforms.uShipSpeed = uniforms.uShipSpeed;
     shader.uniforms.uNightMix = uniforms.uNightMix;
+    shader.uniforms.uCameraPos = uniforms.uCameraPos;
+    shader.uniforms.uUnderwaterMix = uniforms.uUnderwaterMix;
 
     shader.vertexShader =
       `
@@ -81,11 +97,13 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       uniform vec2 uShipForward;
       uniform float uShipSpeed;
       uniform float uNightMix;
+      uniform vec3 uCameraPos;
+      uniform float uUnderwaterMix;
       varying vec3 vOceanWorldPos;
       varying float vWaveCrest;
       ` + shader.fragmentShader;
 
-    // Perturb fragment normal for crisp glistening moonlight & sunlight glints on Atlantic capillary waves
+    // Perturb fragment normal for capillary glints above water and wave-underside caustics below
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <normal_fragment_maps>',
       `
@@ -95,6 +113,9 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       float dhdx = cos(wx * 0.38 + uTime * 1.9) * 0.16 + cos((wx + wz * 0.6) * 0.92 - uTime * 2.8) * 0.12 + sin(wx * 2.1 - uTime * 3.6) * 0.06;
       float dhdz = sin(wz * 0.34 - uTime * 1.6) * 0.16 + sin((wz - wx * 0.5) * 0.88 + uTime * 2.5) * 0.12 + cos(wz * 1.9 + uTime * 3.3) * 0.06;
       vec3 rippleWorldN = normalize(vec3(-dhdx, 1.0, -dhdz));
+      if (!gl_FrontFacing) {
+        rippleWorldN = -rippleWorldN;
+      }
       vec3 rippleViewN = normalize((viewMatrix * vec4(rippleWorldN, 0.0)).xyz);
       normal = normalize(mix(normal, rippleViewN, 0.78));
       `,
@@ -111,14 +132,14 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       float nMix = clamp(uNightMix, 0.0, 1.0);
       float sunsetWeight = sin(nMix * 3.14159265);
 
-      vec3 deepDay = vec3(0.022, 0.115, 0.195);
-      vec3 crestDay = vec3(0.068, 0.245, 0.345);
-      vec3 deepNight = vec3(0.014, 0.048, 0.092);
-      vec3 crestNight = vec3(0.042, 0.145, 0.228);
+      vec3 deepDay = vec3(0.020, 0.135, 0.225);
+      vec3 crestDay = vec3(0.075, 0.285, 0.395);
+      vec3 deepNight = vec3(0.014, 0.055, 0.105);
+      vec3 crestNight = vec3(0.048, 0.165, 0.255);
 
       vec3 deepBase = mix(deepDay, deepNight, smoothstep(0.15, 0.9, nMix));
       vec3 crestBase = mix(crestDay, crestNight, smoothstep(0.15, 0.9, nMix));
-      deepBase = mix(deepBase, vec3(0.045, 0.068, 0.135), sunsetWeight * 0.55);
+      deepBase = mix(deepBase, vec3(0.045, 0.072, 0.145), sunsetWeight * 0.55);
       crestBase = mix(crestBase, vec3(0.21, 0.14, 0.135), sunsetWeight * 0.55);
 
       vec3 seaCol = mix(deepBase, crestBase, clamp(vWaveCrest + ripple * 0.2, 0.0, 1.0));
@@ -150,7 +171,47 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       vec3 foamDay = vec3(0.92, 0.96, 1.0);
       vec3 foamCol = mix(foamDay, foamNight, nMix);
       foamCol = mix(foamCol, vec3(0.96, 0.78, 0.62), sunsetWeight * 0.5);
-      diffuseColor.rgb = mix(seaCol, foamCol, wakeMask * 0.86);
+
+      // View-dependent translucency (above water) & Snell's window (underwater underside)
+      vec3 viewToCam = normalize(uCameraPos - vOceanWorldPos);
+      vec3 upWaveN = normalize(vec3(
+        -(cos(vOceanWorldPos.x * 0.38 + uTime * 1.9) * 0.16 + cos((vOceanWorldPos.x + vOceanWorldPos.z * 0.6) * 0.92 - uTime * 2.8) * 0.12),
+        1.0,
+        -(sin(vOceanWorldPos.z * 0.34 - uTime * 1.6) * 0.16 + sin((vOceanWorldPos.z - vOceanWorldPos.x * 0.5) * 0.88 + uTime * 2.5) * 0.12)
+      ));
+
+      if (gl_FrontFacing) {
+        float ndv = clamp(dot(upWaveN, viewToCam), 0.0, 1.0);
+        float fresnel = pow(1.0 - ndv, 2.8);
+        diffuseColor.rgb = mix(seaCol, foamCol, wakeMask * 0.86);
+        float waterAlpha = mix(0.54, 0.95, fresnel);
+        diffuseColor.a = mix(waterAlpha, 0.95, clamp(wakeMask * 0.95, 0.0, 1.0));
+      } else {
+        // Underwater underside: Snell's window transmission directly overhead + TIR shimmering teal outside
+        float cosUp = clamp(dot(upWaveN, -viewToCam), 0.0, 1.0);
+        float snell = smoothstep(0.36, 0.74, cosUp);
+        float caustic = pow(clamp(1.0 - abs(ripple) * 1.15, 0.0, 1.0), 3.0);
+        vec3 tirTeal = mix(vec3(0.03, 0.18, 0.26), vec3(0.11, 0.42, 0.54), clamp(vWaveCrest * 0.6 + caustic * 0.55, 0.0, 1.0));
+        vec3 snellSky = mix(vec3(0.22, 0.50, 0.68), vec3(0.08, 0.24, 0.38), nMix);
+        vec3 undersideCol = mix(tirTeal, snellSky, snell * 0.78);
+        undersideCol = mix(undersideCol, foamCol * 0.65, wakeMask * 0.45);
+        diffuseColor.rgb = undersideCol;
+        diffuseColor.a = mix(0.74, 0.24, snell);
+      }
+      `,
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <emissivemap_fragment>',
+      `
+      #include <emissivemap_fragment>
+      if (!gl_FrontFacing) {
+        float causticGlow = pow(clamp(1.0 - abs(sin(vOceanWorldPos.x * 0.72 + uTime * 2.4) * cos(vOceanWorldPos.z * 0.64 - uTime * 1.8)), 0.0, 1.0), 4.0);
+        vec3 underRayVec = normalize(uCameraPos - vOceanWorldPos);
+        float snellGlow = smoothstep(0.36, 0.76, clamp(-underRayVec.y, 0.0, 1.0));
+        vec3 moonlightRefract = mix(vec3(0.18, 0.42, 0.56), vec3(0.06, 0.20, 0.32), clamp(uNightMix, 0.0, 1.0));
+        totalEmissiveRadiance += moonlightRefract * (0.28 + 0.55 * snellGlow) + vec3(0.06, 0.24, 0.32) * causticGlow * (0.35 + 0.4 * snellGlow);
+      }
       `,
     );
 
@@ -166,11 +227,23 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
 
   const oceanMesh = new THREE.Mesh(oceanGeo, oceanMat);
   oceanMesh.receiveShadow = true;
+  oceanMesh.renderOrder = 2;
+
+  // Deep abyssal sea-depth plane far below keel (-118 m) so translucent surface preserves rich oceanic color above & below
+  const abyssGeo = new THREE.PlaneGeometry(2500, 2500, 1, 1);
+  abyssGeo.rotateX(-Math.PI / 2);
+  const abyssMat = new THREE.MeshBasicMaterial({
+    color: 0x051c2b,
+    fog: true,
+  });
+  const abyssMesh = new THREE.Mesh(abyssGeo, abyssMat);
+  abyssMesh.position.y = -118;
 
   // =========================================================================
   // SKY DOME: APRIL HARBOR DAYLIGHT -> ATLANTIC SUNSET -> ARCTIC MOONLIT NIGHT
   // =========================================================================
   const skyGroup = new THREE.Group();
+  skyGroup.add(abyssMesh);
 
   const skyGeo = new THREE.SphereGeometry(1180, 36, 22);
   const skyMat = new THREE.ShaderMaterial({
@@ -179,6 +252,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     fog: false,
     uniforms: {
       uNightMix: { value: 1.0 },
+      uUnderwaterMix: { value: 0.0 },
       uSunDir: { value: new THREE.Vector3(-0.45, 0.52, -0.72).normalize() },
     },
     vertexShader: `
@@ -190,6 +264,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     `,
     fragmentShader: `
       uniform float uNightMix;
+      uniform float uUnderwaterMix;
       uniform vec3 uSunDir;
       varying vec3 vLocalPos;
       void main() {
@@ -240,6 +315,13 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
           float band = exp(-pow((dir.x * 0.65 + dir.z * 0.42 - dir.y * 0.55) * 3.4, 2.0));
           float cloud = 0.5 + 0.5 * sin(dir.x * 9.0 + dir.z * 7.0) * cos(dir.y * 11.0 - dir.x * 5.0);
           col += vec3(0.025, 0.042, 0.072) * band * cloud * smoothstep(0.08, 0.45, h) * nightAlpha;
+        }
+
+        // Underwater horizon darkening below sea surface while leaving Snell's window overhead luminous
+        if (uUnderwaterMix > 0.01) {
+          vec3 deepWaterFog = vec3(0.012, 0.068, 0.112);
+          float belowHor = 1.0 - smoothstep(-0.08, 0.26, dir.y);
+          col = mix(col, deepWaterFog, clamp(uUnderwaterMix * (0.28 + 0.72 * belowHor), 0.0, 1.0));
         }
 
         gl_FragColor = vec4(col, 1.0);
@@ -336,7 +418,74 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
   stars.computeBoundingSphere();
   skyGroup.add(stars);
 
+  // GPU-wrapped suspended underwater marine snow & micro-bubbles (zero per-frame CPU iteration)
+  const marineCount = isSoftwareGl ? 180 : 420;
+  const marinePos = new Float32Array(marineCount * 3);
+  const marineSeed = new Float32Array(marineCount);
+  for (let i = 0; i < marineCount; i++) {
+    marinePos[i * 3 + 0] = (((i * 73.17) % 1000) / 1000) * 44;
+    marinePos[i * 3 + 1] = (((i * 191.43) % 1000) / 1000) * 24;
+    marinePos[i * 3 + 2] = (((i * 317.89) % 1000) / 1000) * 44;
+    marineSeed[i] = 0.5 + (((i * 41) % 100) / 100);
+  }
+  const marineGeo = new THREE.BufferGeometry();
+  marineGeo.setAttribute('position', new THREE.BufferAttribute(marinePos, 3));
+  marineGeo.setAttribute('aSeed', new THREE.BufferAttribute(marineSeed, 1));
+  const marineMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      uTime: uniforms.uTime,
+      uCameraPos: uniforms.uCameraPos,
+      uUnderwaterMix: uniforms.uUnderwaterMix,
+    },
+    vertexShader: `
+      attribute float aSeed;
+      uniform float uTime;
+      uniform vec3 uCameraPos;
+      varying float vFade;
+      void main() {
+        vec3 box = vec3(44.0, 24.0, 44.0);
+        vec3 drift = position + vec3(
+          sin(uTime * 0.45 + aSeed * 6.28) * 1.1,
+          uTime * (0.45 + aSeed * 0.55),
+          cos(uTime * 0.38 + aSeed * 5.1) * 1.1
+        );
+        vec3 wrapped = mod(drift - uCameraPos + box * 0.5, box) - box * 0.5 + uCameraPos;
+        // Clamp below sea level so marine snow never floats into dry air above waves
+        if (wrapped.y > -0.15) {
+          vFade = 0.0;
+        } else {
+          float dist = length(wrapped - uCameraPos);
+          vFade = (1.0 - smoothstep(10.0, 22.0, dist)) * smoothstep(0.6, 2.2, dist);
+        }
+        vec4 mvPosition = modelViewMatrix * vec4(wrapped, 1.0);
+        gl_PointSize = clamp((24.0 * aSeed) / max(1.0, -mvPosition.z), 1.5, 5.5);
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform float uUnderwaterMix;
+      varying float vFade;
+      void main() {
+        vec2 c = gl_PointCoord - 0.5;
+        float d = length(c);
+        if (d > 0.5 || vFade <= 0.005) discard;
+        float soft = smoothstep(0.5, 0.08, d);
+        gl_FragColor = vec4(0.62, 0.88, 0.98, soft * vFade * uUnderwaterMix * 0.62);
+      }
+    `,
+  });
+  const marinePoints = new THREE.Points(marineGeo, marineMat);
+  marinePoints.frustumCulled = false;
+  marinePoints.renderOrder = 1;
+  marinePoints.visible = false;
+  skyGroup.add(marinePoints);
+
   const snapStep = oceanSize / segs;
+  const abyssDayColor = new THREE.Color(0x051c2b);
+  const abyssNightColor = new THREE.Color(0x020b15);
 
   const update = (
     time: number,
@@ -375,15 +524,29 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     haloMesh.position.copy(moonMesh.position);
     haloMesh.lookAt(0, 0, 0);
 
+    abyssMat.color.copy(abyssDayColor).lerp(abyssNightColor, clampedNight);
+
     oceanMesh.position.x = Math.round(shipX / snapStep) * snapStep;
     oceanMesh.position.z = Math.round(shipZ / snapStep) * snapStep;
 
     skyGroup.position.set(shipX, 0, shipZ);
   };
 
+  const updateCameraView = (camPos: THREE.Vector3, underwaterMix: number) => {
+    uniforms.uCameraPos.value.copy(camPos);
+    const clampedUnder = THREE.MathUtils.clamp(underwaterMix, 0, 1);
+    uniforms.uUnderwaterMix.value = clampedUnder;
+    skyMat.uniforms.uUnderwaterMix.value = clampedUnder;
+    marinePoints.visible = clampedUnder > 0.01;
+    // Keep abyss floor comfortably below deep plunging camera
+    abyssMesh.position.y = Math.min(-118, camPos.y - 45);
+  };
+
   const dispose = () => {
     oceanGeo.dispose();
     oceanMat.dispose();
+    abyssGeo.dispose();
+    abyssMat.dispose();
     skyGeo.dispose();
     skyMat.dispose();
     moonGeo.dispose();
@@ -392,9 +555,11 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     haloMat.dispose();
     starGeo.dispose();
     starMat.dispose();
+    marineGeo.dispose();
+    marineMat.dispose();
   };
 
-  return { oceanMesh, skyGroup, uniforms, update, dispose };
+  return { oceanMesh, skyGroup, uniforms, update, updateCameraView, dispose };
 }
 
 // =========================================================================
@@ -431,9 +596,11 @@ export class ParticlePool {
       metalness: 0.04,
       transparent: true,
       opacity: 0.82,
+      depthWrite: false,
     });
     this.mesh = new THREE.InstancedMesh(geo, mat, maxCount);
     this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 3;
 
     for (let i = 0; i < maxCount; i++) {
       this.slots.push({

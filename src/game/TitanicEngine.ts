@@ -4,7 +4,12 @@ import { SoundEngine } from './audio';
 import { buildCarpathiaShip, CarpathiaRig } from './carpathiaBuilder';
 import { buildSouthamptonHarbor, HarborRig } from './harborBuilder';
 import { IcebergEntity, IcebergFactory } from './icebergBuilder';
-import { createOceanAndSky, OceanAndSkyRig, ParticlePool } from './oceanAndSky';
+import {
+  createOceanAndSky,
+  OceanAndSkyRig,
+  ParticlePool,
+  sampleOceanWaveHeight,
+} from './oceanAndSky';
 import { buildTitanicShip, BREAK_Z, TitanicShipRig } from './shipBuilder';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import {
@@ -144,6 +149,8 @@ export class TitanicEngine {
   private userOverrodeHarborCam = false;
   private timeSkipProgress = 0;
   private nightMix = 0;
+  private rescueDawnMix = 0;
+  private wheelhouseFloodLevel = 0;
   private readonly tempSkyColor = new THREE.Color();
   private readonly tempColorA = new THREE.Color();
   private readonly tempColorB = new THREE.Color();
@@ -278,6 +285,8 @@ export class TitanicEngine {
     // Start Title screen in bright sunlit Southampton Harbor Berth 44
     this.applyAtmosphere(0);
     this.oceanAndSky.update(0, 0, 0, 0, 0, 0);
+    this.updateTitleCamera();
+    this.oceanAndSky.updateCameraView(this.camera.position, 0);
     this.harbor.update(0, 0, 0);
 
     if (!this.isSoftwareGl) {
@@ -396,6 +405,8 @@ export class TitanicEngine {
     this.boatsRecovered = 0;
     this.focusCarpathia = false;
     this.flareCooldown = 4.0;
+    this.rescueDawnMix = 0;
+    this.wheelhouseFloodLevel = 0;
   }
 
   public setHarborChapter(idx: number): void {
@@ -848,7 +859,7 @@ export class TitanicEngine {
     this.targetOrbitYaw -= dx * 0.0062;
     this.targetOrbitPitch = THREE.MathUtils.clamp(
       this.targetOrbitPitch + dy * 0.0045,
-      -0.32,
+      -0.85,
       1.18,
     );
     if (this.phase === 'sinking') {
@@ -995,6 +1006,7 @@ export class TitanicEngine {
       this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, 0, 0);
       this.particles.update(dt);
       this.updateTitleCamera();
+      this.syncUnderwaterCameraEffects(0, dt);
       this.sound.updateShipAmbience(2, false);
       return;
     }
@@ -1029,9 +1041,11 @@ export class TitanicEngine {
       } else {
         this.advanceRescueSimulation(dt);
       }
+      this.applyAtmosphere(1.0, this.phase === 'gameover' ? this.rescueDawnMix : 0);
       this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
       this.particles.update(dt);
       this.updateCamera(dt);
+      this.syncUnderwaterCameraEffects(1.0, dt);
       this.sound.updateShipAmbience(this.speedKnots, false);
       return;
     }
@@ -1116,12 +1130,13 @@ export class TitanicEngine {
     this.sinkDropY = -floodNorm * 2.2;
     this.sinkPitch = -floodNorm * 0.088;
     this.sinkList = this.listDirection * floodNorm * 0.095;
-    this.ship.setWheelhouseFloodLevel(floodNorm > 0.78 ? ((floodNorm - 0.78) / 0.22) * 0.14 : 0);
+    this.wheelhouseFloodLevel = floodNorm > 0.78 ? ((floodNorm - 0.78) / 0.22) * 0.14 : 0;
 
     // Update Ship Transforms, Crew, Wheel, Telegraph, Bow Spray & Light Rig
     this.updateShipVisualRig(dt, this.speedKnots);
     this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, this.floodingPct);
     this.emitBowSpray(dt, fwdX, fwdZ);
+    this.applyAtmosphere(1.0);
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
 
     // Iceberg Spawning, Motion, Warnings, Near-Miss & Collision
@@ -1132,6 +1147,7 @@ export class TitanicEngine {
     this.shakeIntensity = Math.max(0, this.shakeIntensity - dt * 1.9);
 
     this.updateCamera(dt);
+    this.syncUnderwaterCameraEffects(1.0, dt);
     this.sound.updateShipAmbience(this.speedKnots, true);
 
     // Check Sinking Trigger (Hull Breached OR Water Overwhelms Bulkheads)
@@ -1158,7 +1174,7 @@ export class TitanicEngine {
     }
   }
 
-  private applyAtmosphere(nightMix: number): void {
+  private applyAtmosphere(nightMix: number, dawnBoost = 0): void {
     const n = THREE.MathUtils.clamp(nightMix, 0, 1);
     this.nightMix = n;
     const sunsetWeight = Math.sin(n * Math.PI);
@@ -1170,6 +1186,10 @@ export class TitanicEngine {
     if (sunsetWeight > 0.01) {
       this.tempColorA.setHex(0x9f5a3f);
       this.tempSkyColor.lerp(this.tempColorA, sunsetWeight * 0.72);
+    }
+    if (dawnBoost > 0.005) {
+      this.tempColorA.setHex(0x162b4d);
+      this.tempSkyColor.lerp(this.tempColorA, THREE.MathUtils.clamp(dawnBoost, 0, 1));
     }
 
     (this.scene.background as THREE.Color).copy(this.tempSkyColor);
@@ -1208,6 +1228,59 @@ export class TitanicEngine {
     // Keep ship wheelhouse dials softly lit by day and full warm glow by night
     if (this.phase !== 'sinking' && this.phase !== 'aftermath' && this.phase !== 'gameover') {
       this.ship.setPowerLevel(THREE.MathUtils.lerp(0.28, 1.0, THREE.MathUtils.smoothstep(n, 0.25, 0.85)));
+    }
+  }
+
+  private syncUnderwaterCameraEffects(nightMix: number, dt: number): void {
+    const waveY = sampleOceanWaveHeight(this.camera.position.x, this.camera.position.z, this.simTime);
+    const depthBelowWave = waveY - this.camera.position.y;
+    const underwaterMix = THREE.MathUtils.clamp((depthBelowWave + 0.14) / 0.48, 0, 1);
+
+    this.oceanAndSky.updateCameraView(this.camera.position, underwaterMix);
+    this.ship.setWheelhouseFloodLevel(this.wheelhouseFloodLevel, 1 - underwaterMix);
+
+    if (underwaterMix > 0.005) {
+      const depthNorm = THREE.MathUtils.clamp(Math.max(0, depthBelowWave) / 45, 0, 1);
+      // Cold North Atlantic underwater teal-navy transition (brighter cyan by day, deep arctic teal by night)
+      this.tempColorA.setHex(nightMix < 0.5 ? 0x0b435c : 0x052638);
+      this.tempColorB.setHex(0x02111e);
+      this.tempColorA.lerp(this.tempColorB, depthNorm);
+
+      (this.scene.background as THREE.Color).lerp(this.tempColorA, underwaterMix);
+      this.sceneFog.color.copy(this.scene.background as THREE.Color);
+
+      const targetUnderDensity = THREE.MathUtils.lerp(0.015, 0.024, depthNorm);
+      this.sceneFog.density = THREE.MathUtils.lerp(this.sceneFog.density, targetUnderDensity, underwaterMix);
+
+      // Filtered aqua ambient light underwater so wheelhouse, hull & ice remain clearly readable
+      this.tempColorA.setHex(nightMix < 0.5 ? 0x5fb4d4 : 0x2f7594);
+      this.hemiLight.color.lerp(this.tempColorA, underwaterMix * 0.88);
+      this.tempColorA.setHex(0x020c14);
+      this.hemiLight.groundColor.lerp(this.tempColorA, underwaterMix * 0.9);
+      this.hemiLight.intensity = THREE.MathUtils.lerp(this.hemiLight.intensity, 1.12 - depthNorm * 0.22, underwaterMix);
+
+      this.tempColorA.setHex(0x7cc8e6);
+      this.moonKeyLight.color.lerp(this.tempColorA, underwaterMix * 0.72);
+      this.moonKeyLight.intensity *= 1 - underwaterMix * (0.28 + depthNorm * 0.35);
+
+      // Emit rising air bubbles outside the submerged cockpit/bow during sinking
+      if (this.phase === 'sinking' && underwaterMix > 0.15 && dt > 0 && Math.random() < 0.65) {
+        const camX = this.camera.position.x;
+        const camY = this.camera.position.y;
+        const camZ = this.camera.position.z;
+        this.particles.emit(
+          camX + (Math.random() - 0.5) * 14,
+          camY - 2.5 + Math.random() * 4.5,
+          camZ + (Math.random() - 0.5) * 14,
+          (Math.random() - 0.5) * 1.4,
+          2.2 + Math.random() * 2.8,
+          (Math.random() - 0.5) * 1.4,
+          0.14 + Math.random() * 0.24,
+          1.4 + Math.random() * 0.9,
+          -3.6,
+          0xbfe9ff,
+        );
+      }
     }
   }
 
@@ -1256,6 +1329,7 @@ export class TitanicEngine {
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 0);
     this.particles.update(dt);
     this.updateCamera(dt);
+    this.syncUnderwaterCameraEffects(0, dt);
     this.sound.updateShipAmbience(this.speedKnots, true);
 
     if (this.harborProgress >= 1.0 && this.shipZ <= -560) {
@@ -1301,6 +1375,7 @@ export class TitanicEngine {
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, this.speedKnots, nightMix);
     this.particles.update(dt);
     this.updateCamera(dt);
+    this.syncUnderwaterCameraEffects(nightMix, dt);
     this.sound.updateShipAmbience(this.speedKnots, true);
 
     if (this.timeSkipProgress >= 1.0) {
@@ -1396,7 +1471,8 @@ export class TitanicEngine {
           );
         }
 
-        if (!this.userAdjustedCameraInSink && !this.autoFocusedBreakup) {
+        const inCockpit = VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse';
+        if (!inCockpit && !this.userAdjustedCameraInSink && !this.autoFocusedBreakup) {
           this.autoFocusedBreakup = true;
           this.focusVesselSpot('funnels', false);
         }
@@ -1440,7 +1516,7 @@ export class TitanicEngine {
 
     // Rising cold Atlantic floodwater inside the wheelhouse
     const whFlood = THREE.MathUtils.clamp((p - 0.05) / 0.34, 0, 1);
-    this.ship.setWheelhouseFloodLevel(whFlood);
+    this.wheelhouseFloodLevel = whFlood;
 
     // Boiler room flooding causes bridge dynamos to flicker & fail completely shortly after breakup
     if (p < 0.34) {
@@ -1494,16 +1570,19 @@ export class TitanicEngine {
       this.ship.root,
     );
 
-    // Auto-pull out smoothly to Boat Deck & then Full Ship view so the player sees the entire breakup & plunge
-    if (!this.userAdjustedCameraInSink && !this.autoFocusedSinkLifeboats && p > 0.08) {
+    // Pull exterior cameras to Boat Deck / Full Ship if user wasn't in the wheelhouse cockpit
+    const inCockpit = VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse';
+    if (!inCockpit && !this.userAdjustedCameraInSink && !this.autoFocusedSinkLifeboats && p > 0.08) {
       this.autoFocusedSinkLifeboats = true;
       this.focusVesselSpot('funnels', false);
     }
 
+    this.applyAtmosphere(1.0);
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
     this.particles.update(dt);
     this.shakeIntensity = Math.max(0.06 * (1 - p), this.shakeIntensity - dt * 1.4);
     this.updateCamera(dt);
+    this.syncUnderwaterCameraEffects(1.0, dt);
 
     if (this.sinkProgress >= 1) {
       this.enterAftermath();
@@ -1593,11 +1672,7 @@ export class TitanicEngine {
       }
 
       // Gentle predawn sky lift as rescue liner arrives
-      const dawnMix = easeOut * 0.22;
-      this.tempColorA.setHex(0x091628);
-      this.tempColorB.setHex(0x162b4d);
-      (this.scene.background as THREE.Color).copy(this.tempColorA).lerp(this.tempColorB, dawnMix);
-      this.sceneFog.color.copy(this.scene.background as THREE.Color);
+      this.rescueDawnMix = easeOut * 0.22;
 
       // Subtle bow spray & red funnel coal wisps while moving slowly
       if (u < 0.85 && Math.random() < 0.45) {
@@ -1630,6 +1705,7 @@ export class TitanicEngine {
       laddersDeployed = true;
       sweepLight = true;
       this.carpathia.root.visible = true;
+      this.rescueDawnMix = 0.22;
       boardingProgress = THREE.MathUtils.clamp((t - WAIT_SEC - APPROACH_SEC) / BOARDING_SEC, 0, 1);
     } else {
       if (this.carpathiaStage !== 'complete') {
@@ -1648,6 +1724,7 @@ export class TitanicEngine {
       laddersDeployed = true;
       sweepLight = false;
       this.carpathia.root.visible = true;
+      this.rescueDawnMix = 0.22;
       boardingProgress = 1.0;
     }
 
@@ -1712,9 +1789,11 @@ export class TitanicEngine {
     }
 
     this.advanceRescueSimulation(dt);
+    this.applyAtmosphere(1.0, this.rescueDawnMix);
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, 0, 1.0);
     this.particles.update(dt);
     this.updateCamera(dt);
+    this.syncUnderwaterCameraEffects(1.0, dt);
     this.sound.updateShipAmbience(this.carpathiaStage === 'approaching' ? 6 : 0, false);
 
     this.telemetryAccum += dt;
@@ -2086,22 +2165,27 @@ export class TitanicEngine {
     const hullRoll = this.ship.hullMeshGroup.rotation.z;
 
     const dzFromBreak = _vFocusLocal.z - BREAK_Z;
-    const pitchedY =
-      halfY +
-      _vFocusLocal.y * Math.cos(halfPitch) -
-      dzFromBreak * Math.sin(halfPitch) +
-      _vFocusLocal.x * Math.sin(hullRoll);
+    const rotY = _vFocusLocal.y * Math.cos(halfPitch) - dzFromBreak * Math.sin(halfPitch);
+    const rotZ = BREAK_Z + _vFocusLocal.y * Math.sin(halfPitch) + dzFromBreak * Math.cos(halfPitch);
+    const shiftedY = halfY + rotY;
+    const rolledX = _vFocusLocal.x * Math.cos(hullRoll) - shiftedY * Math.sin(hullRoll);
+    const rolledY = _vFocusLocal.x * Math.sin(hullRoll) + shiftedY * Math.cos(hullRoll);
 
-    let worldY = pitchedY;
+    let worldXLocal = rolledX;
+    let worldY = rolledY;
+    let worldZLocal = rotZ;
+
     if (this.phase === 'aftermath' || this.phase === 'gameover') {
+      worldXLocal = _vFocusLocal.x;
       worldY = 4.2;
+      worldZLocal = _vFocusLocal.z;
     } else if (isOverviewShip) {
       const sternY = this.ship.sternGroup.position.y;
       const sternPitch = this.ship.sternGroup.rotation.x;
       const sternTipWorldY = sternY + 10 * Math.cos(sternPitch) - (195.1 - BREAK_Z) * Math.sin(sternPitch);
+      worldXLocal = _vFocusLocal.x;
       worldY = THREE.MathUtils.clamp(Math.max(4.5, sternTipWorldY * 0.38), 3.5, 24.0);
-    } else if (isSinkOrAfter) {
-      worldY = Math.max(-1.2, pitchedY);
+      worldZLocal = _vFocusLocal.z;
     }
 
     _vFwd.set(Math.sin(this.headingRad), 0, -Math.cos(this.headingRad));
@@ -2117,8 +2201,8 @@ export class TitanicEngine {
     } else {
       _vFocusWorld
         .set(this.shipX, worldY, this.shipZ)
-        .addScaledVector(_vRight, _vFocusLocal.x)
-        .addScaledVector(_vFwd, -_vFocusLocal.z);
+        .addScaledVector(_vRight, worldXLocal)
+        .addScaledVector(_vFwd, -worldZLocal);
     }
 
     // Compute unit look direction in ship-local frame, rotated by ship heading
@@ -2135,10 +2219,14 @@ export class TitanicEngine {
 
     _vCamPos.copy(_vFocusWorld).addScaledVector(_vLookDir, -this.orbitDistance);
 
-    // Keep exterior camera above the ocean waves
-    if (this.orbitDistance > 1.5 && _vCamPos.y < 1.25) {
+    // Keep exterior cruising/aftermath camera above waves, while allowing cockpit & sinking spots to ride underwater
+    const isInterior = spec.id === 'wheelhouse' && this.orbitDistance < 2.2;
+    const allowUnderwater =
+      isInterior ||
+      (this.phase === 'sinking' && !isOverviewShip);
+    if (!allowUnderwater && this.orbitDistance > 1.5 && _vCamPos.y < 1.25) {
       _vCamPos.y = 1.25;
-    } else if (this.orbitDistance <= 1.5 && _vCamPos.y < 0.85) {
+    } else if (!allowUnderwater && this.orbitDistance <= 1.5 && _vCamPos.y < 0.85) {
       _vCamPos.y = 0.85;
     }
 
@@ -2156,7 +2244,6 @@ export class TitanicEngine {
     this.camera.lookAt(_vCamTarget);
 
     // Subtle ship roll feel when standing inside wheelhouse
-    const isInterior = spec.id === 'wheelhouse' && this.orbitDistance < 2.2;
     const rollInfluence = isInterior ? 0.55 : 0.08;
     this.camera.rotation.z += this.rollAngle * rollInfluence;
   }

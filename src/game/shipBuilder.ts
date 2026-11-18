@@ -22,7 +22,7 @@ export interface TitanicShipRig {
   warmBridgeLight: THREE.PointLight;
   crewAndLifeboats: CrewAndLifeboatSystem;
   setPowerLevel: (power: number) => void;
-  setWheelhouseFloodLevel: (level: number) => void;
+  setWheelhouseFloodLevel: (level: number, fadeFactor?: number) => void;
   setBreakupVisual: (broken: boolean, emberPower?: number) => void;
   dispose: () => void;
 }
@@ -487,13 +487,13 @@ export function buildTitanicShip(
   const bridgeGlassMat = trackMat(
     new THREE.MeshPhysicalMaterial({
       color: 0xd9eefc,
-      metalness: 0.0,
-      roughness: 0.06,
-      transmission: isSoftwareGl ? 0 : 0.92,
+      metalness: 0.08,
+      roughness: 0.05,
+      clearcoat: isSoftwareGl ? 0.0 : 1.0,
+      clearcoatRoughness: 0.06,
+      reflectivity: 0.9,
       transparent: true,
-      opacity: isSoftwareGl ? 0.14 : 1.0,
-      ior: 1.52,
-      thickness: 0.08,
+      opacity: 0.15,
       depthWrite: false,
     }),
   );
@@ -2290,13 +2290,15 @@ export function buildTitanicShip(
     crewAndLifeboats.setLanternPower(p);
   };
 
-  const setWheelhouseFloodLevel = (level: number) => {
+  const setWheelhouseFloodLevel = (level: number, fadeFactor = 1.0) => {
     const l = THREE.MathUtils.clamp(level, 0, 1);
-    if (l <= 0.01) {
+    const fade = THREE.MathUtils.clamp(fadeFactor, 0, 1);
+    if (l <= 0.01 || fade <= 0.02) {
       whFloodMesh.visible = false;
       return;
     }
     whFloodMesh.visible = true;
+    whFloodMat.opacity = 0.84 * fade;
     whFloodMesh.position.y = 0.14 + l * 1.65;
   };
 
