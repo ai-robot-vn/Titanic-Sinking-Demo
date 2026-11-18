@@ -5,13 +5,21 @@ export interface OceanUniforms {
   uShipPos: { value: THREE.Vector2 };
   uShipForward: { value: THREE.Vector2 };
   uShipSpeed: { value: number };
+  uNightMix: { value: number };
 }
 
 export interface OceanAndSkyRig {
   oceanMesh: THREE.Mesh;
   skyGroup: THREE.Group;
   uniforms: OceanUniforms;
-  update: (time: number, shipX: number, shipZ: number, headingRad: number, speedKnots: number) => void;
+  update: (
+    time: number,
+    shipX: number,
+    shipZ: number,
+    headingRad: number,
+    speedKnots: number,
+    nightMix?: number,
+  ) => void;
   dispose: () => void;
 }
 
@@ -21,15 +29,16 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     uShipPos: { value: new THREE.Vector2(0, 0) },
     uShipForward: { value: new THREE.Vector2(0, -1) },
     uShipSpeed: { value: 0 },
+    uNightMix: { value: 1 },
   };
 
-  const oceanSize = 1800;
-  const segs = isSoftwareGl ? 76 : 144;
+  const oceanSize = 2300;
+  const segs = isSoftwareGl ? 80 : 156;
   const oceanGeo = new THREE.PlaneGeometry(oceanSize, oceanSize, segs, segs);
   oceanGeo.rotateX(-Math.PI / 2);
 
   const oceanMat = new THREE.MeshStandardMaterial({
-    color: 0x051524,
+    color: 0xffffff,
     roughness: 0.11,
     metalness: 0.42,
     envMapIntensity: 1.45,
@@ -41,6 +50,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     shader.uniforms.uShipPos = uniforms.uShipPos;
     shader.uniforms.uShipForward = uniforms.uShipForward;
     shader.uniforms.uShipSpeed = uniforms.uShipSpeed;
+    shader.uniforms.uNightMix = uniforms.uNightMix;
 
     shader.vertexShader =
       `
@@ -70,11 +80,12 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       uniform vec2 uShipPos;
       uniform vec2 uShipForward;
       uniform float uShipSpeed;
+      uniform float uNightMix;
       varying vec3 vOceanWorldPos;
       varying float vWaveCrest;
       ` + shader.fragmentShader;
 
-    // Perturb fragment normal for crisp glistening moonlight glints on Atlantic capillary waves
+    // Perturb fragment normal for crisp glistening moonlight & sunlight glints on Atlantic capillary waves
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <normal_fragment_maps>',
       `
@@ -97,34 +108,48 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       float ripB = sin((vOceanWorldPos.x - vOceanWorldPos.z) * 1.25 + uTime * 3.1);
       float ripple = (ripA + ripB) * 0.5;
 
-      vec3 deepSea = vec3(0.014, 0.048, 0.092);
-      vec3 crestSea = vec3(0.042, 0.145, 0.228);
-      vec3 seaCol = mix(deepSea, crestSea, clamp(vWaveCrest + ripple * 0.2, 0.0, 1.0));
+      float nMix = clamp(uNightMix, 0.0, 1.0);
+      float sunsetWeight = sin(nMix * 3.14159265);
 
-      // Ship bow Kelvin wake, hull rubbing foam & stern propeller wash
+      vec3 deepDay = vec3(0.022, 0.115, 0.195);
+      vec3 crestDay = vec3(0.068, 0.245, 0.345);
+      vec3 deepNight = vec3(0.014, 0.048, 0.092);
+      vec3 crestNight = vec3(0.042, 0.145, 0.228);
+
+      vec3 deepBase = mix(deepDay, deepNight, smoothstep(0.15, 0.9, nMix));
+      vec3 crestBase = mix(crestDay, crestNight, smoothstep(0.15, 0.9, nMix));
+      deepBase = mix(deepBase, vec3(0.045, 0.068, 0.135), sunsetWeight * 0.55);
+      crestBase = mix(crestBase, vec3(0.21, 0.14, 0.135), sunsetWeight * 0.55);
+
+      vec3 seaCol = mix(deepBase, crestBase, clamp(vWaveCrest + ripple * 0.2, 0.0, 1.0));
+
+      // Ship bow Kelvin wake, hull rubbing foam & stern propeller wash (269m x 28m hull)
       vec2 rel = vOceanWorldPos.xz - uShipPos;
       vec2 fwd = normalize(uShipForward);
       vec2 right = vec2(-fwd.y, fwd.x);
-      float along = dot(rel, fwd);   // +70 is bow tip, -78 is stern
+      float along = dot(rel, fwd);   // +74 is bow tip, -195 is stern
       float side = abs(dot(rel, right));
 
       float speedFactor = clamp(abs(uShipSpeed) / 18.0, 0.0, 1.25);
-      float distBehindBow = 69.0 - along;
+      float distBehindBow = 73.5 - along;
       float wakeMask = 0.0;
-      if (distBehindBow > -2.5 && distBehindBow < 240.0) {
-        float armDist = abs(side - (1.6 + max(0.0, distBehindBow) * 0.23));
-        float arm = exp(-armDist * armDist * 0.16);
-        float innerArmDist = abs(side - (1.0 + max(0.0, distBehindBow) * 0.13));
-        float innerArm = exp(-innerArmDist * innerArmDist * 0.22) * 0.5;
-        float hullRub = exp(-abs(side - 9.4) * 0.52) * step(-76.0, along) * step(along, 52.0);
-        float bowSplash = exp(-((along - 69.0) * (along - 69.0) * 0.055 + side * side * 0.11));
-        float sternWash = exp(-side * side * 0.08) * step(along, -74.0) * exp(-max(0.0, -74.0 - along) * 0.025);
-        float fade = exp(-max(0.0, distBehindBow) * 0.0095);
+      if (distBehindBow > -3.0 && distBehindBow < 460.0) {
+        float armDist = abs(side - (2.0 + max(0.0, distBehindBow) * 0.21));
+        float arm = exp(-armDist * armDist * 0.13);
+        float innerArmDist = abs(side - (1.2 + max(0.0, distBehindBow) * 0.12));
+        float innerArm = exp(-innerArmDist * innerArmDist * 0.18) * 0.5;
+        float hullRub = exp(-abs(side - 13.7) * 0.45) * step(-182.0, along) * step(along, 52.0);
+        float bowSplash = exp(-((along - 73.5) * (along - 73.5) * 0.045 + side * side * 0.09));
+        float sternWash = exp(-side * side * 0.055) * step(along, -190.0) * exp(-max(0.0, -190.0 - along) * 0.016);
+        float fade = exp(-max(0.0, distBehindBow) * 0.0055);
         float foamNoise = 0.62 + 0.38 * sin(vOceanWorldPos.x * 0.95 + uTime * 4.5) * cos(vOceanWorldPos.z * 0.95 - uTime * 3.8);
-        wakeMask = clamp((arm * 0.9 + innerArm + hullRub * 0.48 + bowSplash * 1.25 + sternWash * 0.85) * fade * speedFactor * foamNoise, 0.0, 1.0);
+        wakeMask = clamp((arm * 0.9 + innerArm + hullRub * 0.52 + bowSplash * 1.3 + sternWash * 0.95) * fade * speedFactor * foamNoise, 0.0, 1.0);
       }
 
-      vec3 foamCol = vec3(0.76, 0.89, 0.98);
+      vec3 foamNight = vec3(0.76, 0.89, 0.98);
+      vec3 foamDay = vec3(0.92, 0.96, 1.0);
+      vec3 foamCol = mix(foamDay, foamNight, nMix);
+      foamCol = mix(foamCol, vec3(0.96, 0.78, 0.62), sunsetWeight * 0.5);
       diffuseColor.rgb = mix(seaCol, foamCol, wakeMask * 0.86);
       `,
     );
@@ -143,19 +168,18 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
   oceanMesh.receiveShadow = true;
 
   // =========================================================================
-  // ARCTIC NIGHT SKY DOME, MILKY WAY BAND, COLD MOON & MULTI-SCALE STARFIELD
+  // SKY DOME: APRIL HARBOR DAYLIGHT -> ATLANTIC SUNSET -> ARCTIC MOONLIT NIGHT
   // =========================================================================
   const skyGroup = new THREE.Group();
 
-  const skyGeo = new THREE.SphereGeometry(950, 36, 22);
+  const skyGeo = new THREE.SphereGeometry(1180, 36, 22);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
     fog: false,
     uniforms: {
-      uTopColor: { value: new THREE.Color(0x02050d) },
-      uMidColor: { value: new THREE.Color(0x071325) },
-      uHorizonColor: { value: new THREE.Color(0x0c1d32) },
+      uNightMix: { value: 1.0 },
+      uSunDir: { value: new THREE.Vector3(-0.45, 0.52, -0.72).normalize() },
     },
     vertexShader: `
       varying vec3 vLocalPos;
@@ -165,20 +189,58 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       }
     `,
     fragmentShader: `
-      uniform vec3 uTopColor;
-      uniform vec3 uMidColor;
-      uniform vec3 uHorizonColor;
+      uniform float uNightMix;
+      uniform vec3 uSunDir;
       varying vec3 vLocalPos;
       void main() {
         vec3 dir = normalize(vLocalPos);
         float h = clamp(dir.y, 0.0, 1.0);
-        vec3 col = mix(uHorizonColor, uMidColor, smoothstep(0.0, 0.24, h));
-        col = mix(col, uTopColor, smoothstep(0.22, 0.85, h));
+        float nMix = clamp(uNightMix, 0.0, 1.0);
+        float sunsetWeight = sin(nMix * 3.14159265);
 
-        // Subtle Milky Way band arching overhead
-        float band = exp(-pow((dir.x * 0.65 + dir.z * 0.42 - dir.y * 0.55) * 3.4, 2.0));
-        float cloud = 0.5 + 0.5 * sin(dir.x * 9.0 + dir.z * 7.0) * cos(dir.y * 11.0 - dir.x * 5.0);
-        col += vec3(0.025, 0.042, 0.072) * band * cloud * smoothstep(0.08, 0.45, h);
+        // Day palette (April noon over Southampton)
+        vec3 dayTop = vec3(0.14, 0.34, 0.58);
+        vec3 dayMid = vec3(0.36, 0.60, 0.80);
+        vec3 dayHor = vec3(0.68, 0.82, 0.90);
+
+        // Sunset palette (Atlantic dusk)
+        vec3 sunTop = vec3(0.08, 0.14, 0.28);
+        vec3 sunMid = vec3(0.34, 0.24, 0.38);
+        vec3 sunHor = vec3(0.84, 0.42, 0.21);
+
+        // Night palette (April 14 Arctic Ocean)
+        vec3 nightTop = vec3(0.008, 0.020, 0.051);
+        vec3 nightMid = vec3(0.027, 0.075, 0.145);
+        vec3 nightHor = vec3(0.047, 0.114, 0.196);
+
+        vec3 topCol = mix(dayTop, nightTop, smoothstep(0.15, 0.9, nMix));
+        vec3 midCol = mix(dayMid, nightMid, smoothstep(0.15, 0.9, nMix));
+        vec3 horCol = mix(dayHor, nightHor, smoothstep(0.15, 0.9, nMix));
+
+        topCol = mix(topCol, sunTop, sunsetWeight * 0.72);
+        midCol = mix(midCol, sunMid, sunsetWeight * 0.78);
+        horCol = mix(horCol, sunHor, sunsetWeight * 0.85);
+
+        vec3 col = mix(horCol, midCol, smoothstep(0.0, 0.24, h));
+        col = mix(col, topCol, smoothstep(0.22, 0.85, h));
+
+        // Solar disc & warm atmospheric scatter during day & sunset
+        float sunVisibility = 1.0 - smoothstep(0.52, 0.80, nMix);
+        if (sunVisibility > 0.01) {
+          float sunDot = max(0.0, dot(dir, normalize(uSunDir)));
+          float sunCore = smoothstep(0.9985, 0.9996, sunDot);
+          float sunHalo = pow(sunDot, 12.0) * (0.35 + sunsetWeight * 0.55);
+          vec3 sunTint = mix(vec3(1.0, 0.95, 0.82), vec3(1.0, 0.56, 0.24), sunsetWeight);
+          col += sunTint * (sunCore * 1.4 + sunHalo) * sunVisibility;
+        }
+
+        // Subtle Milky Way band arching overhead at night
+        float nightAlpha = smoothstep(0.42, 0.92, nMix);
+        if (nightAlpha > 0.01) {
+          float band = exp(-pow((dir.x * 0.65 + dir.z * 0.42 - dir.y * 0.55) * 3.4, 2.0));
+          float cloud = 0.5 + 0.5 * sin(dir.x * 9.0 + dir.z * 7.0) * cos(dir.y * 11.0 - dir.x * 5.0);
+          col += vec3(0.025, 0.042, 0.072) * band * cloud * smoothstep(0.08, 0.45, h) * nightAlpha;
+        }
 
         gl_FragColor = vec4(col, 1.0);
       }
@@ -191,6 +253,10 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
   const moonGeo = new THREE.CircleGeometry(21, 32);
   const moonMat = new THREE.ShaderMaterial({
     fog: false,
+    transparent: true,
+    uniforms: {
+      uAlpha: { value: 1.0 },
+    },
     vertexShader: `
       varying vec2 vUv;
       void main() {
@@ -199,13 +265,14 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       }
     `,
     fragmentShader: `
+      uniform float uAlpha;
       varying vec2 vUv;
       void main() {
         vec2 p = (vUv - 0.5) * 2.0;
         float r = length(p);
         float maria = 0.92 + 0.08 * sin(p.x * 5.2 + 0.6) * cos(p.y * 4.8 - 0.4);
         vec3 col = vec3(0.91, 0.96, 1.0) * maria * (1.0 - r * 0.14);
-        gl_FragColor = vec4(col, 1.0);
+        gl_FragColor = vec4(col, uAlpha);
       }
     `,
   });
@@ -233,6 +300,8 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
   const starGeo = new THREE.OctahedronGeometry(0.85, 0);
   const starMat = new THREE.MeshBasicMaterial({
     color: 0xffffff,
+    transparent: true,
+    opacity: 1.0,
     fog: false,
   });
   const stars = new THREE.InstancedMesh(starGeo, starMat, starCount);
@@ -275,11 +344,36 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     shipZ: number,
     headingRad: number,
     speedKnots: number,
+    nightMix = 1.0,
   ) => {
+    const clampedNight = THREE.MathUtils.clamp(nightMix, 0, 1);
     uniforms.uTime.value = time;
     uniforms.uShipPos.value.set(shipX, shipZ);
     uniforms.uShipForward.value.set(Math.sin(headingRad), -Math.cos(headingRad));
     uniforms.uShipSpeed.value = speedKnots;
+    uniforms.uNightMix.value = clampedNight;
+
+    skyMat.uniforms.uNightMix.value = clampedNight;
+    // Sweep sun across the western Atlantic sky from midday high-arc down below the horizon
+    const sunElev = THREE.MathUtils.lerp(0.55, -0.06, Math.min(1, clampedNight / 0.72));
+    const sunX = THREE.MathUtils.lerp(0.32, -0.78, Math.min(1, clampedNight / 0.72));
+    skyMat.uniforms.uSunDir.value.set(sunX, sunElev, -0.68).normalize();
+
+    const nightAlpha = THREE.MathUtils.smoothstep(clampedNight, 0.45, 0.96);
+    stars.visible = nightAlpha > 0.01;
+    starMat.opacity = nightAlpha;
+
+    moonMesh.visible = nightAlpha > 0.01;
+    haloMesh.visible = nightAlpha > 0.01;
+    moonMat.uniforms.uAlpha.value = nightAlpha;
+    haloMat.opacity = 0.14 * nightAlpha;
+
+    // Subtle moon rise into Arctic position during time-lapse
+    const moonY = THREE.MathUtils.lerp(60, 200, nightAlpha);
+    moonMesh.position.set(145, moonY, -760);
+    moonMesh.lookAt(0, 0, 0);
+    haloMesh.position.copy(moonMesh.position);
+    haloMesh.lookAt(0, 0, 0);
 
     oceanMesh.position.x = Math.round(shipX / snapStep) * snapStep;
     oceanMesh.position.z = Math.round(shipZ / snapStep) * snapStep;

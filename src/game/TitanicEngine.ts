@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { SoundEngine } from './audio';
+import { buildSouthamptonHarbor, HarborRig } from './harborBuilder';
 import { IcebergEntity, IcebergFactory } from './icebergBuilder';
 import { createOceanAndSky, OceanAndSkyRig, ParticlePool } from './oceanAndSky';
 import { buildTitanicShip, TitanicShipRig } from './shipBuilder';
@@ -8,10 +9,13 @@ import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import {
   CameraMode,
   GamePhase,
+  HARBOR_CHAPTERS,
   IcebergVariant,
   TARGET_VOYAGE_NM,
   TELEGRAPH_NOTCHES,
   TelemetrySnapshot,
+  VESSEL_SPOTS,
+  VesselSpotId,
 } from './types';
 
 // Pre-allocated math helpers (zero per-frame GC)
@@ -19,15 +23,21 @@ const _vFwd = new THREE.Vector3();
 const _vRight = new THREE.Vector3();
 const _vCamTarget = new THREE.Vector3();
 const _vCamPos = new THREE.Vector3();
-const _vLookPos = new THREE.Vector3();
+const _vLookDir = new THREE.Vector3();
+const _vFocusLocal = new THREE.Vector3();
+const _vFocusWorld = new THREE.Vector3();
 
 const BEST_SCORE_KEY = 'titanic_bridge_best_score_v1';
 
 const HULL_CHECK_POINTS: Array<{ zLocal: number; radius: number }> = [
-  { zLocal: -67, radius: 3.4 },
-  { zLocal: -52, radius: 5.8 },
-  { zLocal: -34, radius: 8.2 },
-  { zLocal: -12, radius: 9.4 },
+  { zLocal: -72, radius: 4.2 },
+  { zLocal: -54, radius: 8.8 },
+  { zLocal: -32, radius: 12.6 },
+  { zLocal: -6, radius: 13.8 },
+  { zLocal: 45, radius: 13.9 },
+  { zLocal: 105, radius: 13.8 },
+  { zLocal: 155, radius: 12.0 },
+  { zLocal: 184, radius: 6.5 },
 ];
 
 export class TitanicEngine {
@@ -39,13 +49,17 @@ export class TitanicEngine {
 
   private readonly textures: ProceduralTextureSet;
   private readonly ship: TitanicShipRig;
+  private readonly harbor: HarborRig;
   private readonly oceanAndSky: OceanAndSkyRig;
   private readonly iceFactory: IcebergFactory;
   private readonly particles: ParticlePool;
   public readonly sound: SoundEngine;
 
+  private readonly hemiLight: THREE.HemisphereLight;
   private readonly moonKeyLight: THREE.DirectionalLight;
+  private readonly rimLight: THREE.DirectionalLight;
   private readonly searchSpotLight: THREE.SpotLight;
+  private readonly sceneFog: THREE.FogExp2;
 
   // Game & Simulation State
   private phase: GamePhase = 'title';
@@ -74,6 +88,7 @@ export class TitanicEngine {
   private sinkList = 0;
   private powerLevel = 1;
   private groanCooldown = 0;
+  private lifeboatsLaunched = 0;
   private score = 0;
   private bestScore = 0;
   private nearMissCount = 0;
@@ -93,14 +108,31 @@ export class TitanicEngine {
   private eventTimer = 0;
   private icebergWarning: string | null = null;
 
-  // Mouse look inside wheelhouse
-  private lookYawOffset = 0;
-  private lookPitchOffset = 0;
-  private targetLookYaw = 0;
-  private targetLookPitch = 0;
+  // Free 360° mouse orbit, zoom & vessel focus spot camera
+  private focusSpotIndex = 0;
+  private camFocusLocal = new THREE.Vector3(0, 14.78, 1.32);
+  private orbitYaw = 0;
+  private orbitPitch = 0.085;
+  private orbitDistance = 0;
+  private targetOrbitYaw = 0;
+  private targetOrbitPitch = 0.085;
+  private targetOrbitDistance = 0;
+  private userAdjustedCameraInSink = false;
+  private autoFocusedSinkLifeboats = false;
   private isPointerDown = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
+
+  // Harbor Introduction & Day-to-Night Time-Skip State
+  private harborChapterIndex = 0;
+  private harborProgress = 0;
+  private harborAutoPlay = true;
+  private userOverrodeHarborCam = false;
+  private timeSkipProgress = 0;
+  private nightMix = 0;
+  private readonly tempSkyColor = new THREE.Color();
+  private readonly tempColorA = new THREE.Color();
+  private readonly tempColorB = new THREE.Color();
 
   // Iceberg management
   private readonly icebergs: IcebergEntity[] = [];
@@ -166,40 +198,41 @@ export class TitanicEngine {
 
     // 3. Scene & Camera
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x071322);
-    this.scene.fog = new THREE.FogExp2(0x091628, 0.0027);
+    this.scene.background = new THREE.Color(0x9ec4db);
+    this.sceneFog = new THREE.FogExp2(0x9ec4db, 0.00095);
+    this.scene.fog = this.sceneFog;
 
     const aspect = (container.clientWidth || window.innerWidth) / (container.clientHeight || window.innerHeight);
-    this.camera = new THREE.PerspectiveCamera(62, aspect, 0.15, 1300);
+    this.camera = new THREE.PerspectiveCamera(62, aspect, 0.15, 1800);
 
     // 4. Mandatory Procedural Studio Environment Reflection
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     pmrem.dispose();
 
-    // 5. Balanced 3-Point Warm/Cool North Atlantic Lighting
-    const hemi = new THREE.HemisphereLight(0x88b8ea, 0x091422, 0.82);
-    this.scene.add(hemi);
+    // 5. Balanced 3-Point Warm/Cool Lighting (morphs cleanly from April Noon to Arctic Night)
+    this.hemiLight = new THREE.HemisphereLight(0xcce7ff, 0x4d5a4f, 1.18);
+    this.scene.add(this.hemiLight);
 
-    this.moonKeyLight = new THREE.DirectionalLight(0xcde4ff, 2.35);
+    this.moonKeyLight = new THREE.DirectionalLight(0xfff3d8, 2.85);
     this.moonKeyLight.position.set(110, 145, -240);
     this.moonKeyLight.castShadow = !this.isSoftwareGl;
     this.moonKeyLight.shadow.mapSize.set(1024, 1024);
     this.moonKeyLight.shadow.bias = -0.0005;
     this.moonKeyLight.shadow.normalBias = 0.02;
-    const d = 140;
+    const d = 230;
     this.moonKeyLight.shadow.camera.left = -d;
     this.moonKeyLight.shadow.camera.right = d;
     this.moonKeyLight.shadow.camera.top = d;
     this.moonKeyLight.shadow.camera.bottom = -d;
     this.moonKeyLight.shadow.camera.near = 20;
-    this.moonKeyLight.shadow.camera.far = 520;
+    this.moonKeyLight.shadow.camera.far = 650;
     this.scene.add(this.moonKeyLight);
     this.scene.add(this.moonKeyLight.target);
 
-    const rimLight = new THREE.DirectionalLight(0x4b77a8, 0.72);
-    rimLight.position.set(-120, 60, 100);
-    this.scene.add(rimLight);
+    this.rimLight = new THREE.DirectionalLight(0x9bc4e8, 0.85);
+    this.rimLight.position.set(-120, 60, 100);
+    this.scene.add(this.rimLight);
 
     // 6. Build Assets
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
@@ -209,12 +242,15 @@ export class TitanicEngine {
     this.scene.add(this.oceanAndSky.oceanMesh);
     this.scene.add(this.oceanAndSky.skyGroup);
 
+    this.harbor = buildSouthamptonHarbor(this.textures, this.isSoftwareGl);
+    this.scene.add(this.harbor.root);
+
     this.ship = buildTitanicShip(this.textures, this.isSoftwareGl);
     this.scene.add(this.ship.root);
 
     // Searchlight SpotLight attached to ship roof
-    this.searchSpotLight = new THREE.SpotLight(0xeef8ff, 24, 420, Math.PI / 9, 0.55, 1.1);
-    this.searchSpotLight.position.set(0, 14.3, -1.5);
+    this.searchSpotLight = new THREE.SpotLight(0xeef8ff, 24, 480, Math.PI / 9, 0.55, 1.1);
+    this.searchSpotLight.position.set(0, 16.25, -1.5);
     this.searchSpotLight.target = this.ship.searchlightTarget;
     this.ship.hullMeshGroup.add(this.searchSpotLight);
 
@@ -222,8 +258,10 @@ export class TitanicEngine {
     this.particles = new ParticlePool(320);
     this.scene.add(this.particles.mesh);
 
-    // Seed atmospheric icebergs for the live Title Screen backdrop
-    this.seedInitialIcebergs();
+    // Start Title screen in bright sunlit Southampton Harbor Berth 44
+    this.applyAtmosphere(0);
+    this.oceanAndSky.update(0, 0, 0, 0, 0, 0);
+    this.harbor.update(0, 0, 0);
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
@@ -261,6 +299,135 @@ export class TitanicEngine {
   // =========================================================================
   // PUBLIC CONTROLS FOR REACT UI & KEYBOARD
   // =========================================================================
+  public startHarborIntro(): void {
+    this.sound.unlock();
+    this.clearIcebergs();
+    this.phase = 'harbor';
+    this.endlessMode = false;
+    this.shipX = 0;
+    this.shipZ = 0;
+    this.headingRad = 0;
+    this.yawRate = 0;
+    this.rudderDeg = 0;
+    this.manualRudderTarget = null;
+    this.wheelVisualAngle = 0;
+    this.rollAngle = 0;
+    this.telegraphIndex = 2; // SLOW AHEAD departing harbor
+    this.speedKnots = 0;
+    this.distanceNm = 0;
+    this.hullIntegrity = 100;
+    this.floodingPct = 0;
+    this.waterIngressRate = 0;
+    this.listDirection = 1;
+    this.sinkProgress = 0;
+    this.sinkDropY = 0;
+    this.sinkPitch = 0;
+    this.sinkList = 0;
+    this.powerLevel = 1;
+    this.lifeboatsLaunched = 0;
+    this.score = 0;
+    this.nearMissCount = 0;
+    this.combo = 1;
+    this.searchlightTimer = 0;
+    this.searchlightCooldown = 0;
+    this.hitstopTimer = 0;
+    this.shakeIntensity = 0;
+    this.damageFlashTimer = 0;
+    this.eventText = null;
+    this.eventTimer = 0;
+    this.icebergWarning = null;
+    this.spawnAccumDist = 0;
+    this.userAdjustedCameraInSink = false;
+    this.autoFocusedSinkLifeboats = false;
+
+    this.harborChapterIndex = 0;
+    this.harborProgress = 0;
+    this.harborAutoPlay = true;
+    this.userOverrodeHarborCam = false;
+    this.timeSkipProgress = 0;
+    this.harbor.root.visible = true;
+    this.applyAtmosphere(0);
+
+    this.ship.hullMeshGroup.position.set(0, 0, 0);
+    this.ship.hullMeshGroup.rotation.set(0, 0, 0);
+    this.ship.setWheelhouseFloodLevel(0);
+    this.ship.crewAndLifeboats.reset(this.ship.hullMeshGroup);
+    this.applyHarborChapterCamera(0, true);
+
+    this.sound.playSteamWhistle();
+    this.sound.playTelegraphBell();
+    this.emitTelemetry();
+  }
+
+  public setHarborChapter(idx: number): void {
+    if (this.phase !== 'harbor') return;
+    const clamped = Math.max(0, Math.min(HARBOR_CHAPTERS.length - 1, idx));
+    this.harborChapterIndex = clamped;
+    this.harborProgress = HARBOR_CHAPTERS[clamped].startProgress + 0.01;
+    this.userOverrodeHarborCam = false;
+    this.applyHarborChapterCamera(clamped, false);
+    this.sound.playTelegraphBell();
+    this.emitTelemetry();
+  }
+
+  public nextHarborChapter(): void {
+    if (this.phase !== 'harbor') return;
+    if (this.harborChapterIndex >= HARBOR_CHAPTERS.length - 1) {
+      this.skipHarborToNight();
+    } else {
+      this.setHarborChapter(this.harborChapterIndex + 1);
+    }
+  }
+
+  public prevHarborChapter(): void {
+    if (this.phase !== 'harbor') return;
+    this.setHarborChapter(Math.max(0, this.harborChapterIndex - 1));
+  }
+
+  public toggleHarborAutoPlay(): void {
+    if (this.phase !== 'harbor') return;
+    this.harborAutoPlay = !this.harborAutoPlay;
+    this.emitTelemetry();
+  }
+
+  public skipHarborToNight(): void {
+    this.sound.unlock();
+    if (this.phase !== 'harbor') return;
+    // Place ship cleanly beyond the harbor breakwater mouth and begin the 4-day sunset-to-night time-lapse
+    this.harborProgress = 1.0;
+    this.shipZ = Math.min(this.shipZ, -585);
+    this.beginTimeSkip();
+  }
+
+  private beginTimeSkip(): void {
+    this.phase = 'timeskip';
+    this.timeSkipProgress = 0;
+    this.telegraphIndex = 4; // FULL AHEAD
+    this.userOverrodeHarborCam = false;
+    this.sound.playTelegraphBell();
+    this.emitTelemetry();
+  }
+
+  private applyHarborChapterCamera(idx: number, snapImmediate: boolean): void {
+    const ch = HARBOR_CHAPTERS[idx];
+    const spotIdx = VESSEL_SPOTS.findIndex((s) => s.id === ch.focusSpotId);
+    if (spotIdx !== -1) {
+      this.focusSpotIndex = spotIdx;
+    }
+    this.targetOrbitYaw = ch.orbitYaw;
+    this.targetOrbitPitch = ch.orbitPitch;
+    this.targetOrbitDistance = ch.orbitDistance;
+    this.cameraMode = ch.focusSpotId === 'wheelhouse' ? 'wheelhouse' : 'bridgeWing';
+
+    if (snapImmediate && spotIdx !== -1) {
+      const spec = VESSEL_SPOTS[spotIdx];
+      this.camFocusLocal.set(spec.localTarget[0], spec.localTarget[1], spec.localTarget[2]);
+      this.orbitYaw = ch.orbitYaw;
+      this.orbitPitch = ch.orbitPitch;
+      this.orbitDistance = ch.orbitDistance;
+    }
+  }
+
   public startGame(): void {
     this.sound.unlock();
     this.phase = 'playing';
@@ -286,6 +453,7 @@ export class TitanicEngine {
     this.sinkList = 0;
     this.powerLevel = 1;
     this.groanCooldown = 0;
+    this.lifeboatsLaunched = 0;
     this.score = 0;
     this.nearMissCount = 0;
     this.combo = 1;
@@ -298,13 +466,18 @@ export class TitanicEngine {
     this.eventTimer = 2.8;
     this.icebergWarning = null;
     this.spawnAccumDist = 0;
-    this.targetLookYaw = 0;
-    this.targetLookPitch = 0;
+    this.userAdjustedCameraInSink = false;
+    this.autoFocusedSinkLifeboats = false;
+
+    this.harbor.root.visible = false;
+    this.applyAtmosphere(1.0);
 
     this.ship.hullMeshGroup.position.set(0, 0, 0);
     this.ship.hullMeshGroup.rotation.set(0, 0, 0);
     this.ship.setPowerLevel(1);
     this.ship.setWheelhouseFloodLevel(0);
+    this.ship.crewAndLifeboats.reset(this.ship.hullMeshGroup);
+    this.focusVesselSpot('wheelhouse', false);
 
     this.seedInitialIcebergs();
     this.sound.playTelegraphBell();
@@ -344,11 +517,12 @@ export class TitanicEngine {
   public returnToTitle(): void {
     this.phase = 'title';
     this.heldKeys.clear();
+    this.clearIcebergs();
     this.shipX = 0;
     this.shipZ = 0;
     this.headingRad = 0;
     this.rudderDeg = 0;
-    this.speedKnots = 12;
+    this.speedKnots = 0;
     this.hullIntegrity = 100;
     this.floodingPct = 0;
     this.waterIngressRate = 0;
@@ -357,11 +531,16 @@ export class TitanicEngine {
     this.sinkPitch = 0;
     this.sinkList = 0;
     this.powerLevel = 1;
+    this.lifeboatsLaunched = 0;
+    this.userAdjustedCameraInSink = false;
+    this.autoFocusedSinkLifeboats = false;
+    this.harbor.root.visible = true;
+    this.applyAtmosphere(0);
     this.ship.hullMeshGroup.position.set(0, 0, 0);
     this.ship.hullMeshGroup.rotation.set(0, 0, 0);
-    this.ship.setPowerLevel(1);
     this.ship.setWheelhouseFloodLevel(0);
-    this.seedInitialIcebergs();
+    this.ship.crewAndLifeboats.reset(this.ship.hullMeshGroup);
+    this.focusVesselSpot('wheelhouse', false);
     this.emitTelemetry();
   }
 
@@ -397,9 +576,40 @@ export class TitanicEngine {
     this.emitTelemetry();
   }
 
-  public toggleCameraMode(): void {
-    this.cameraMode = this.cameraMode === 'wheelhouse' ? 'bridgeWing' : 'wheelhouse';
+  public focusVesselSpot(spotId: VesselSpotId, announce = true): void {
+    const idx = VESSEL_SPOTS.findIndex((s) => s.id === spotId);
+    if (idx === -1) return;
+    this.focusSpotIndex = idx;
+    const spec = VESSEL_SPOTS[idx];
+    this.targetOrbitYaw = spec.defaultOrbitYaw;
+    this.targetOrbitPitch = spec.defaultOrbitPitch;
+    this.targetOrbitDistance = spec.defaultDistance;
+    this.cameraMode = spec.id === 'wheelhouse' ? 'wheelhouse' : 'bridgeWing';
+
+    if (this.phase === 'sinking' && announce) {
+      this.userAdjustedCameraInSink = true;
+    }
+    if (this.phase === 'harbor' && announce) {
+      this.userOverrodeHarborCam = true;
+    }
+    if (announce && this.phase === 'playing') {
+      this.eventText = `VIEW: ${spec.label.toUpperCase()}`;
+      this.eventTimer = 1.8;
+    }
     this.emitTelemetry();
+  }
+
+  public cycleFocusSpot(): void {
+    const nextIdx = (this.focusSpotIndex + 1) % VESSEL_SPOTS.length;
+    this.focusVesselSpot(VESSEL_SPOTS[nextIdx].id, true);
+  }
+
+  public toggleCameraMode(): void {
+    if (VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse') {
+      this.focusVesselSpot('funnels', true);
+    } else {
+      this.focusVesselSpot('wheelhouse', true);
+    }
   }
 
   public toggleMute(): void {
@@ -430,8 +640,29 @@ export class TitanicEngine {
     if (this.phase === 'title') {
       if (code === 'Enter' || code === 'Space') {
         e.preventDefault();
-        this.startGame();
+        this.startHarborIntro();
       }
+      return;
+    }
+
+    if (this.phase === 'harbor') {
+      if (code === 'ArrowRight' || code === 'KeyN') {
+        e.preventDefault();
+        this.nextHarborChapter();
+      } else if (code === 'ArrowLeft' || code === 'KeyB') {
+        e.preventDefault();
+        this.prevHarborChapter();
+      } else if (code === 'KeyS') {
+        e.preventDefault();
+        this.cycleFocusSpot();
+      } else if (code === 'Enter' || code === 'Space') {
+        e.preventDefault();
+        this.skipHarborToNight();
+      }
+      return;
+    }
+
+    if (this.phase === 'timeskip') {
       return;
     }
 
@@ -439,12 +670,20 @@ export class TitanicEngine {
       if (code === 'Enter') {
         e.preventDefault();
         this.startGame();
+      } else if (code === 'KeyS') {
+        e.preventDefault();
+        this.cycleFocusSpot();
+      } else if (code === 'KeyC') {
+        this.toggleCameraMode();
       }
       return;
     }
 
     if (this.phase === 'sinking') {
-      if (code === 'KeyC') {
+      if (code === 'KeyS') {
+        e.preventDefault();
+        this.cycleFocusSpot();
+      } else if (code === 'KeyC') {
         this.toggleCameraMode();
       } else if (code === 'Enter' || code === 'Space') {
         e.preventDefault();
@@ -460,9 +699,12 @@ export class TitanicEngine {
     if (code === 'KeyW' || code === 'ArrowUp') {
       e.preventDefault();
       this.stepTelegraph(1);
-    } else if (code === 'KeyS' || code === 'ArrowDown') {
+    } else if (code === 'KeyX' || code === 'ArrowDown') {
       e.preventDefault();
       this.stepTelegraph(-1);
+    } else if (code === 'KeyS') {
+      e.preventDefault();
+      this.cycleFocusSpot();
     } else if (code === 'Space') {
       e.preventDefault();
       this.triggerSearchlight();
@@ -481,7 +723,7 @@ export class TitanicEngine {
   };
 
   private readonly handlePointerDown = (e: PointerEvent) => {
-    if (this.phase !== 'playing') return;
+    if (this.phase === 'title' || this.phase === 'paused' || this.phase === 'timeskip') return;
     this.sound.unlock();
     this.isPointerDown = true;
     this.lastPointerX = e.clientX;
@@ -489,17 +731,43 @@ export class TitanicEngine {
   };
 
   private readonly handlePointerMove = (e: PointerEvent) => {
-    if (!this.isPointerDown || this.phase !== 'playing') return;
+    if (!this.isPointerDown || this.phase === 'title' || this.phase === 'paused' || this.phase === 'timeskip') return;
     const dx = e.clientX - this.lastPointerX;
     const dy = e.clientY - this.lastPointerY;
     this.lastPointerX = e.clientX;
     this.lastPointerY = e.clientY;
-    this.targetLookYaw = THREE.MathUtils.clamp(this.targetLookYaw - dx * 0.0028, -0.45, 0.45);
-    this.targetLookPitch = THREE.MathUtils.clamp(this.targetLookPitch - dy * 0.002, -0.18, 0.22);
+    this.targetOrbitYaw -= dx * 0.0062;
+    this.targetOrbitPitch = THREE.MathUtils.clamp(
+      this.targetOrbitPitch + dy * 0.0045,
+      -0.32,
+      1.18,
+    );
+    if (this.phase === 'sinking') {
+      this.userAdjustedCameraInSink = true;
+    } else if (this.phase === 'harbor') {
+      this.userOverrodeHarborCam = true;
+    }
   };
 
   private readonly handlePointerUp = () => {
     this.isPointerDown = false;
+  };
+
+  private readonly handleWheel = (e: WheelEvent) => {
+    if (this.phase === 'title' || this.phase === 'paused' || this.phase === 'timeskip') return;
+    e.preventDefault();
+    const minDist = VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse' ? 0 : 6;
+    const step = e.deltaY * 0.045;
+    this.targetOrbitDistance = THREE.MathUtils.clamp(
+      this.targetOrbitDistance + step,
+      minDist,
+      260,
+    );
+    if (this.phase === 'sinking') {
+      this.userAdjustedCameraInSink = true;
+    } else if (this.phase === 'harbor') {
+      this.userOverrodeHarborCam = true;
+    }
   };
 
   private readonly handleResize = () => {
@@ -518,6 +786,7 @@ export class TitanicEngine {
     window.addEventListener('resize', this.handleResize);
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', this.handlePointerDown);
+    canvas.addEventListener('wheel', this.handleWheel, { passive: false });
     window.addEventListener('pointermove', this.handlePointerMove);
     window.addEventListener('pointerup', this.handlePointerUp);
   }
@@ -529,6 +798,7 @@ export class TitanicEngine {
     window.removeEventListener('resize', this.handleResize);
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.handlePointerDown);
+    canvas.removeEventListener('wheel', this.handleWheel);
     window.removeEventListener('pointermove', this.handlePointerMove);
     window.removeEventListener('pointerup', this.handlePointerUp);
   }
@@ -604,17 +874,29 @@ export class TitanicEngine {
     }
 
     if (this.phase === 'title') {
-      // Atmospheric live cruising pan on Title Screen
-      this.shipZ -= 18 * dt;
-      this.rudderDeg = Math.sin(this.simTime * 0.35) * 6;
+      // Sunlit Southampton Harbor moored beauty pan on Title Screen
+      this.applyAtmosphere(0);
+      this.rudderDeg = Math.sin(this.simTime * 0.35) * 4;
       this.wheelVisualAngle = THREE.MathUtils.damp(this.wheelVisualAngle, -this.rudderDeg * 0.11, 5, dt);
       this.ship.helmWheel.rotation.z = this.wheelVisualAngle;
-      this.updateIcebergsTitleDrift(dt);
-      this.updateShipVisualRig(dt, 14);
-      this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, 14);
+      this.updateShipVisualRig(dt, 0);
+      this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0);
+      this.harbor.update(this.simTime, this.shipZ, 0);
+      this.emitBowSpray(dt, 0, -1, true);
+      this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, 0, 0);
       this.particles.update(dt);
       this.updateTitleCamera();
-      this.sound.updateShipAmbience(12, false);
+      this.sound.updateShipAmbience(2, false);
+      return;
+    }
+
+    if (this.phase === 'harbor') {
+      this.stepHarborSequence(dt);
+      return;
+    }
+
+    if (this.phase === 'timeskip') {
+      this.stepTimeSkipSequence(dt);
       return;
     }
 
@@ -628,7 +910,18 @@ export class TitanicEngine {
       this.shipZ -= this.speedKnots * 1.5 * dt * Math.cos(this.headingRad);
       this.shipX += this.speedKnots * 1.5 * dt * Math.sin(this.headingRad);
       this.updateShipVisualRig(dt, this.speedKnots);
-      this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots);
+      if (this.phase === 'victory') {
+        this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, this.floodingPct);
+      } else {
+        this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
+          this.simTime,
+          dt,
+          1.0,
+          this.ship.hullMeshGroup,
+          this.ship.root,
+        );
+      }
+      this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
       this.particles.update(dt);
       this.updateCamera(dt);
       this.sound.updateShipAmbience(this.speedKnots, false);
@@ -717,10 +1010,11 @@ export class TitanicEngine {
     this.sinkList = this.listDirection * floodNorm * 0.095;
     this.ship.setWheelhouseFloodLevel(floodNorm > 0.78 ? ((floodNorm - 0.78) / 0.22) * 0.14 : 0);
 
-    // Update Ship Transforms, Wheel, Telegraph, Bow Spray & Light Rig
+    // Update Ship Transforms, Crew, Wheel, Telegraph, Bow Spray & Light Rig
     this.updateShipVisualRig(dt, this.speedKnots);
+    this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, this.floodingPct);
     this.emitBowSpray(dt, fwdX, fwdZ);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots);
+    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
 
     // Iceberg Spawning, Motion, Warnings, Near-Miss & Collision
     this.manageIcebergField(dt, worldSpeed, fwdX, fwdZ);
@@ -729,11 +1023,6 @@ export class TitanicEngine {
     this.particles.update(dt);
     this.shakeIntensity = Math.max(0, this.shakeIntensity - dt * 1.9);
 
-    if (!this.isPointerDown) {
-      // Gently drift look offset back toward center when not dragging
-      this.targetLookYaw = THREE.MathUtils.damp(this.targetLookYaw, 0, 1.4, dt);
-      this.targetLookPitch = THREE.MathUtils.damp(this.targetLookPitch, 0, 1.4, dt);
-    }
     this.updateCamera(dt);
     this.sound.updateShipAmbience(this.speedKnots, true);
 
@@ -761,6 +1050,164 @@ export class TitanicEngine {
     }
   }
 
+  private applyAtmosphere(nightMix: number): void {
+    const n = THREE.MathUtils.clamp(nightMix, 0, 1);
+    this.nightMix = n;
+    const sunsetWeight = Math.sin(n * Math.PI);
+
+    // Sky & Fog color interpolation: April Noon -> Golden Atlantic Sunset -> Arctic Midnight
+    this.tempColorA.setHex(0x9ec4db);
+    this.tempColorB.setHex(0x091628);
+    this.tempSkyColor.copy(this.tempColorA).lerp(this.tempColorB, THREE.MathUtils.smoothstep(n, 0.15, 0.9));
+    if (sunsetWeight > 0.01) {
+      this.tempColorA.setHex(0x9f5a3f);
+      this.tempSkyColor.lerp(this.tempColorA, sunsetWeight * 0.72);
+    }
+
+    (this.scene.background as THREE.Color).copy(this.tempSkyColor);
+    this.sceneFog.color.copy(this.tempSkyColor);
+    this.sceneFog.density = THREE.MathUtils.lerp(0.00095, 0.0021, n);
+
+    // Hemisphere Light
+    this.tempColorA.setHex(0xcce7ff);
+    this.tempColorB.setHex(0x88b8ea);
+    this.hemiLight.color.copy(this.tempColorA).lerp(this.tempColorB, n);
+    if (sunsetWeight > 0.01) {
+      this.tempColorA.setHex(0xe8a47c);
+      this.hemiLight.color.lerp(this.tempColorA, sunsetWeight * 0.55);
+    }
+    this.tempColorA.setHex(0x4d5a4f);
+    this.tempColorB.setHex(0x091422);
+    this.hemiLight.groundColor.copy(this.tempColorA).lerp(this.tempColorB, n);
+    this.hemiLight.intensity = THREE.MathUtils.lerp(1.18, 0.82, n);
+
+    // Directional Sun-to-Moon Key Light
+    this.tempColorA.setHex(0xfff3d8);
+    this.tempColorB.setHex(0xcde4ff);
+    this.moonKeyLight.color.copy(this.tempColorA).lerp(this.tempColorB, n);
+    if (sunsetWeight > 0.01) {
+      this.tempColorA.setHex(0xff9248);
+      this.moonKeyLight.color.lerp(this.tempColorA, sunsetWeight * 0.78);
+    }
+    this.moonKeyLight.intensity = THREE.MathUtils.lerp(2.85, 2.35, n);
+
+    // Rim Fill Light
+    this.tempColorA.setHex(0x9bc4e8);
+    this.tempColorB.setHex(0x4b77a8);
+    this.rimLight.color.copy(this.tempColorA).lerp(this.tempColorB, n);
+    this.rimLight.intensity = THREE.MathUtils.lerp(0.85, 0.72, n);
+
+    // Keep ship wheelhouse dials softly lit by day and full warm glow by night
+    if (this.phase !== 'sinking' && this.phase !== 'gameover') {
+      this.ship.setPowerLevel(THREE.MathUtils.lerp(0.28, 1.0, THREE.MathUtils.smoothstep(n, 0.25, 0.85)));
+    }
+  }
+
+  private stepHarborSequence(dt: number): void {
+    this.applyAtmosphere(0);
+
+    if (this.harborAutoPlay) {
+      this.harborProgress = Math.min(1, this.harborProgress + dt / 36.0);
+    }
+
+    // Track current chapter based on progress
+    let chIdx = 0;
+    for (let i = 0; i < HARBOR_CHAPTERS.length; i++) {
+      if (this.harborProgress >= HARBOR_CHAPTERS[i].startProgress) {
+        chIdx = i;
+      }
+    }
+    if (chIdx !== this.harborChapterIndex) {
+      this.harborChapterIndex = chIdx;
+      if (!this.userOverrodeHarborCam) {
+        this.applyHarborChapterCamera(chIdx, false);
+      }
+      this.emitTelemetry();
+    }
+
+    // Smoothly sail Titanic from Berth 44 (z = 0) past channel buoys & breakwater mouth (z = -620)
+    const targetZ = -this.harborProgress * 620;
+    const prevZ = this.shipZ;
+    this.shipZ = THREE.MathUtils.damp(this.shipZ, targetZ, 2.2, dt);
+    const velUnits = Math.max(0, (prevZ - this.shipZ) / Math.max(dt, 0.001));
+    this.speedKnots = THREE.MathUtils.damp(this.speedKnots, Math.min(14, velUnits / 1.9), 3.0, dt);
+
+    // Subtle helm demonstration when showing Chapter 4 inside the Wheelhouse
+    if (this.harborChapterIndex === 3) {
+      this.rudderDeg = Math.sin(this.simTime * 1.1) * 14;
+      this.telegraphIndex = 3; // HALF AHEAD
+    } else {
+      this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, 0, 3, dt);
+      this.telegraphIndex = 2;
+    }
+
+    this.updateShipVisualRig(dt, this.speedKnots);
+    this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0);
+    this.harbor.update(this.simTime, this.shipZ, 0);
+    this.emitBowSpray(dt, 0, -1, true);
+    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 0);
+    this.particles.update(dt);
+    this.updateCamera(dt);
+    this.sound.updateShipAmbience(this.speedKnots, true);
+
+    if (this.harborProgress >= 1.0 && this.shipZ <= -560) {
+      this.beginTimeSkip();
+      return;
+    }
+
+    this.telemetryAccum += dt;
+    if (this.telemetryAccum >= 0.08) {
+      this.telemetryAccum = 0;
+      this.emitTelemetry();
+    }
+  }
+
+  private stepTimeSkipSequence(dt: number): void {
+    this.timeSkipProgress = Math.min(1, this.timeSkipProgress + dt / 4.4);
+    const p = this.timeSkipProgress;
+
+    // 4-day Atlantic crossing time-lapse: Noon -> Golden Sunset -> Starlit Arctic Night
+    const nightMix = THREE.MathUtils.smoothstep(p, 0.05, 0.92);
+    this.applyAtmosphere(nightMix);
+
+    // Surge ahead away from harbor mouth into open sea
+    this.speedKnots = THREE.MathUtils.lerp(13, 20, THREE.MathUtils.smoothstep(p, 0.0, 0.75));
+    const surgeSpeed = this.speedKnots * 4.2; // accelerated time-lapse visual wake
+    this.shipZ -= surgeSpeed * dt;
+
+    // Harbor fades out behind in the distance
+    this.harbor.root.visible = p < 0.48;
+    if (this.harbor.root.visible) {
+      this.harbor.update(this.simTime, this.shipZ, nightMix);
+    }
+
+    // Glide camera cleanly from exterior sea view back into the Wheelhouse Helm before player takes control
+    if (p > 0.36 && VESSEL_SPOTS[this.focusSpotIndex].id !== 'wheelhouse') {
+      this.focusVesselSpot('wheelhouse', false);
+    }
+
+    this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, 0, 4, dt);
+    this.updateShipVisualRig(dt, this.speedKnots);
+    this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0);
+    this.emitBowSpray(dt, 0, -1);
+    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, this.speedKnots, nightMix);
+    this.particles.update(dt);
+    this.updateCamera(dt);
+    this.sound.updateShipAmbience(this.speedKnots, true);
+
+    if (this.timeSkipProgress >= 1.0) {
+      // Transition cleanly into Ice Alley Night Watch at (0, 0)
+      this.startGame();
+      return;
+    }
+
+    this.telemetryAccum += dt;
+    if (this.telemetryAccum >= 0.05) {
+      this.telemetryAccum = 0;
+      this.emitTelemetry();
+    }
+  }
+
   private triggerSinking(): void {
     this.hullIntegrity = Math.max(0, this.hullIntegrity);
     this.floodingPct = 100;
@@ -779,7 +1226,7 @@ export class TitanicEngine {
   }
 
   private stepSinkingSequence(dt: number): void {
-    this.sinkProgress = Math.min(1, this.sinkProgress + dt / 10.5);
+    this.sinkProgress = Math.min(1, this.sinkProgress + dt / 17.5);
 
     // Engines stop & forward momentum bleeds off as bow buries into sea
     this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, 0.7, dt);
@@ -789,10 +1236,10 @@ export class TitanicEngine {
     this.shipX += fwdX * worldSpeed * dt;
     this.shipZ += fwdZ * worldSpeed * dt;
 
-    // Dramatic bow-down plunge, vertical submergence, and heavy list
-    this.sinkDropY = -2.2 - Math.pow(this.sinkProgress, 1.25) * 19.8;
-    this.sinkPitch = -0.088 - Math.sin(this.sinkProgress * Math.PI * 0.5) * 0.44;
-    this.sinkList = this.listDirection * (0.095 + Math.sin(this.sinkProgress * Math.PI * 0.58) * 0.36);
+    // Dramatic bow-down plunge, vertical submergence, and heavy list across the 269.1m hull
+    this.sinkDropY = -2.4 - Math.pow(this.sinkProgress, 1.2) * 56.0;
+    this.sinkPitch = -0.088 - Math.sin(this.sinkProgress * Math.PI * 0.5) * 0.46;
+    this.sinkList = this.listDirection * (0.095 + Math.sin(this.sinkProgress * Math.PI * 0.58) * 0.38);
 
     // Rising cold Atlantic floodwater inside the wheelhouse
     const whFlood = THREE.MathUtils.clamp((this.sinkProgress - 0.06) / 0.46, 0, 1);
@@ -818,20 +1265,20 @@ export class TitanicEngine {
     }
     this.sound.updateSinkingAmbience(this.sinkProgress);
 
-    // Churning white foam & trapped air bursts along submerging deck & funnel
-    if (this.sinkProgress < 0.94 && Math.random() < 0.75) {
+    // Churning white foam & trapped air bursts along submerging 269m deck & funnels
+    if (this.sinkProgress < 0.94 && Math.random() < 0.8) {
       const rightX = Math.cos(this.headingRad);
       const rightZ = Math.sin(this.headingRad);
-      const along = THREE.MathUtils.lerp(54, -8, this.sinkProgress) + (Math.random() - 0.5) * 26;
-      const sideOff = (Math.random() - 0.5) * 14;
+      const along = THREE.MathUtils.lerp(70, -165, this.sinkProgress) + (Math.random() - 0.5) * 34;
+      const sideOff = (Math.random() - 0.5) * 22;
       this.particles.emit(
         this.shipX + fwdX * along + rightX * sideOff,
-        0.35 + Math.random() * 1.4,
+        0.35 + Math.random() * 1.5,
         this.shipZ + fwdZ * along + rightZ * sideOff,
         (Math.random() - 0.5) * 4.5,
         2.5 + Math.random() * 4.5,
         (Math.random() - 0.5) * 4.5,
-        0.7 + Math.random() * 1.1,
+        0.8 + Math.random() * 1.2,
         0.8 + Math.random() * 0.6,
         6.5,
         Math.random() < 0.35 ? 0xe0f2fe : 0x9bd7f5,
@@ -839,7 +1286,24 @@ export class TitanicEngine {
     }
 
     this.updateShipVisualRig(dt, this.speedKnots);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots);
+    this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
+      this.simTime,
+      dt,
+      this.sinkProgress,
+      this.ship.hullMeshGroup,
+      this.ship.root,
+    );
+    // Smoothly pull out to Boat Deck & Lifeboats overlook if player hasn't manually moved camera
+    if (
+      !this.userAdjustedCameraInSink &&
+      !this.autoFocusedSinkLifeboats &&
+      this.sinkProgress > 0.22
+    ) {
+      this.autoFocusedSinkLifeboats = true;
+      this.focusVesselSpot('lifeboats', false);
+    }
+
+    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
     this.particles.update(dt);
     this.shakeIntensity = Math.max(0.08 * (1 - this.sinkProgress), this.shakeIntensity - dt * 1.5);
     this.updateCamera(dt);
@@ -904,69 +1368,72 @@ export class TitanicEngine {
 
     // Searchlight beam intensity & sweeping arc (scales with dynamo power)
     if (this.searchlightTimer > 0 && this.powerLevel > 0.05) {
-      const sweepX = Math.sin(this.simTime * 1.9) * 34;
-      this.ship.searchlightTarget.position.set(sweepX, 2.0, -145);
-      this.ship.searchlightHead.rotation.y = -Math.atan2(sweepX, 145);
-      this.searchSpotLight.intensity = 280 * this.powerLevel;
+      const sweepX = Math.sin(this.simTime * 1.9) * 38;
+      this.ship.searchlightTarget.position.set(sweepX, 2.0, -165);
+      this.ship.searchlightHead.rotation.y = -Math.atan2(sweepX, 165);
+      this.searchSpotLight.intensity = 310 * this.powerLevel;
       this.searchSpotLight.angle = Math.PI / 7.5;
     } else {
-      this.ship.searchlightTarget.position.set(0, 1.5, -135);
+      this.ship.searchlightTarget.position.set(0, 1.5, -155);
       this.ship.searchlightHead.rotation.y = THREE.MathUtils.damp(
         this.ship.searchlightHead.rotation.y,
         0,
         5,
         dt,
       );
-      this.searchSpotLight.intensity = (speedKnots > 1 ? 26 : 14) * this.powerLevel;
+      this.searchSpotLight.intensity = (speedKnots > 1 ? 28 : 16) * this.powerLevel;
       this.searchSpotLight.angle = Math.PI / 9.5;
     }
 
-    // Keep moon directional light aligned with the visible Arctic moon ahead-starboard
+    // Keep sun/moon directional key light aligned with sky arc
     const fwdX = Math.sin(this.headingRad);
     const fwdZ = -Math.cos(this.headingRad);
-    this.moonKeyLight.target.position.set(this.shipX + fwdX * 55, 0, this.shipZ + fwdZ * 55);
+    const sunArcX = THREE.MathUtils.lerp(95, -140, Math.min(1, this.nightMix / 0.72));
+    const keyOffsetX = THREE.MathUtils.lerp(sunArcX, 115, THREE.MathUtils.smoothstep(this.nightMix, 0.55, 1.0));
+    const keyHeight = THREE.MathUtils.lerp(175, 145, this.nightMix);
+    this.moonKeyLight.target.position.set(this.shipX - fwdX * 45, 0, this.shipZ - fwdZ * 45);
     this.moonKeyLight.position.set(
-      this.shipX + fwdX * 55 + 95,
-      130,
-      this.shipZ + fwdZ * 55 - 235,
+      this.shipX - fwdX * 45 + keyOffsetX,
+      keyHeight,
+      this.shipZ - fwdZ * 45 - 245,
     );
   }
 
-  private emitBowSpray(dt: number, fwdX: number, fwdZ: number): void {
+  private emitBowSpray(dt: number, fwdX: number, fwdZ: number, lightSmokeOnly = false): void {
     const absSpd = Math.abs(this.speedKnots);
     const hullY = this.ship.hullMeshGroup.position.y;
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
 
-    // Subtle coal smoke wisps from active forward funnels #1, #2, #3
-    if (this.powerLevel > 0.1 && hullY > -8) {
-      this.smokeAccum += dt * (2.5 + absSpd * 0.28);
+    // Subtle coal smoke wisps from active forward funnels #1, #2, #3 (at z = 26, 56, 86; top y = 32.5)
+    if (this.powerLevel > 0.1 && hullY > -12) {
+      this.smokeAccum += dt * ((lightSmokeOnly ? 1.8 : 2.8) + absSpd * 0.3);
       while (this.smokeAccum >= 1) {
         this.smokeAccum -= 1;
-        const funnelZ = [11.5, 25.5, 39.5][Math.floor(Math.random() * 3)];
+        const funnelZ = [26.0, 56.0, 86.0][Math.floor(Math.random() * 3)];
         this.particles.emit(
-          this.shipX - fwdX * funnelZ + (Math.random() - 0.5) * 1.4,
-          22.8 + hullY,
-          this.shipZ - fwdZ * funnelZ + (Math.random() - 0.5) * 1.4,
-          -fwdX * (4 + absSpd * 0.35) + (Math.random() - 0.5) * 1.5,
-          2.2 + Math.random() * 1.2,
-          -fwdZ * (4 + absSpd * 0.35) + (Math.random() - 0.5) * 1.5,
-          1.4 + Math.random() * 1.1,
-          2.1 + Math.random() * 0.8,
+          this.shipX - fwdX * funnelZ + (Math.random() - 0.5) * 1.8,
+          32.5 + hullY,
+          this.shipZ - fwdZ * funnelZ + (Math.random() - 0.5) * 1.8,
+          -fwdX * (2.5 + absSpd * 0.35) + (Math.random() - 0.5) * 1.6,
+          2.4 + Math.random() * 1.4,
+          -fwdZ * (2.5 + absSpd * 0.35) + (Math.random() - 0.5) * 1.6,
+          1.8 + Math.random() * 1.4,
+          2.4 + Math.random() * 0.9,
           -0.8,
-          0x2e3744,
+          this.nightMix < 0.5 ? 0x4b535e : 0x2e3744,
         );
       }
     }
 
     if (absSpd < 4) return;
-    this.sprayAccum += dt * (absSpd * 0.78);
+    this.sprayAccum += dt * (absSpd * 0.85);
 
     while (this.sprayAccum >= 1) {
       this.sprayAccum -= 1;
       const side = Math.random() < 0.5 ? -1 : 1;
-      const bowX = this.shipX + fwdX * 67 + rightX * side * 1.4;
-      const bowZ = this.shipZ + fwdZ * 67 + rightZ * side * 1.4;
+      const bowX = this.shipX + fwdX * 72.5 + rightX * side * 1.5;
+      const bowZ = this.shipZ + fwdZ * 72.5 + rightZ * side * 1.5;
       this.particles.emit(
         bowX,
         0.5,
@@ -974,23 +1441,11 @@ export class TitanicEngine {
         rightX * side * (2.5 + Math.random() * 3.5) - fwdX * 2,
         1.8 + Math.random() * 2.5,
         rightZ * side * (2.5 + Math.random() * 3.5) - fwdZ * 2,
-        0.4 + Math.random() * 0.5,
+        0.45 + Math.random() * 0.55,
         0.55 + Math.random() * 0.35,
         9.5,
         0xd8eefc,
       );
-    }
-  }
-
-  private updateIcebergsTitleDrift(dt: number): void {
-    for (const berg of this.icebergs) {
-      berg.rotY += berg.rotSpeed * dt;
-      berg.group.rotation.y = berg.rotY;
-      berg.group.position.y = Math.sin(this.simTime * 0.9 + berg.bobPhase) * 0.25;
-      if (berg.z > this.shipZ + 80) {
-        berg.z -= 420;
-        berg.group.position.z = berg.z;
-      }
     }
   }
 
@@ -1013,7 +1468,7 @@ export class TitanicEngine {
       const dz = b.z - this.shipZ;
       const along = dx * fwdX + dz * fwdZ;
       const distSq = dx * dx + dz * dz;
-      if (along < -140 || distSq > 540 * 540) {
+      if (along < -230 || distSq > 620 * 620) {
         this.scene.remove(b.group);
         this.icebergs.splice(i, 1);
       }
@@ -1022,31 +1477,31 @@ export class TitanicEngine {
     // Spawn new iceberg rows ahead along current course
     this.spawnAccumDist += Math.max(0, worldSpeed) * dt;
     const difficulty = Math.min(1.35, this.distanceNm / 8.5);
-    const rowInterval = THREE.MathUtils.lerp(72, 46, Math.min(1, difficulty));
+    const rowInterval = THREE.MathUtils.lerp(76, 48, Math.min(1, difficulty));
 
     if (this.spawnAccumDist >= rowInterval && this.icebergs.length < 34) {
       this.spawnAccumDist = 0;
 
-      // Always leave a guaranteed safe channel somewhere within [-95, +95] lateral offset
+      // Always leave a guaranteed safe channel somewhere within [-95, +95] lateral offset (sized for 28m beam)
       const safeLaneCenter = (Math.random() - 0.5) * 140;
-      const safeHalfWidth = THREE.MathUtils.lerp(28, 21, Math.min(1, difficulty));
+      const safeHalfWidth = THREE.MathUtils.lerp(34, 26, Math.min(1, difficulty));
       const countInRow = Math.random() < 0.35 + difficulty * 0.35 ? 3 : 2;
-      const baseAhead = 340 + Math.random() * 65;
+      const baseAhead = 370 + Math.random() * 80;
 
       for (let c = 0; c < countInRow; c++) {
-        let lateral = (Math.random() - 0.5) * 260;
+        let lateral = (Math.random() - 0.5) * 280;
         if (Math.abs(lateral - safeLaneCenter) < safeHalfWidth) {
-          lateral = safeLaneCenter + (lateral >= safeLaneCenter ? 1 : -1) * (safeHalfWidth + 14 + Math.random() * 25);
+          lateral = safeLaneCenter + (lateral >= safeLaneCenter ? 1 : -1) * (safeHalfWidth + 16 + Math.random() * 26);
         }
 
-        const ahead = baseAhead + (Math.random() - 0.5) * 38;
+        const ahead = baseAhead + (Math.random() - 0.5) * 40;
         const sx = this.shipX + fwdX * ahead + rightX * lateral;
         const sz = this.shipZ + fwdZ * ahead + rightZ * lateral;
 
         // Avoid overlapping existing icebergs
         let overlaps = false;
         for (const ex of this.icebergs) {
-          if (Math.hypot(ex.x - sx, ex.z - sz) < ex.collisionRadius + 24) {
+          if (Math.hypot(ex.x - sx, ex.z - sz) < ex.collisionRadius + 30) {
             overlaps = true;
             break;
           }
@@ -1084,15 +1539,15 @@ export class TitanicEngine {
     for (const berg of this.icebergs) {
       const dx = berg.x - this.shipX;
       const dz = berg.z - this.shipZ;
-      const ahead = dx * fwdX + dz * fwdZ; // +68 is bow tip
+      const ahead = dx * fwdX + dz * fwdZ; // +74 is bow tip
       const lateral = dx * rightX + dz * rightZ; // negative = Port, positive = Starboard
 
       // 1. Crow's Nest Warning Check
-      if (ahead > 75 && ahead < 235 && Math.abs(lateral) < berg.collisionRadius + 14) {
+      if (ahead > 80 && ahead < 260 && Math.abs(lateral) < berg.collisionRadius + 18) {
         if (ahead < closestWarningDist) {
           closestWarningDist = ahead;
           closestWarningText =
-            Math.abs(lateral) < 7
+            Math.abs(lateral) < 9
               ? 'ICEBERG DEAD AHEAD'
               : lateral < 0
                 ? 'ICEBERG OFF PORT BOW'
@@ -1163,8 +1618,8 @@ export class TitanicEngine {
       }
 
       // 3. Near-Miss "Clean Passage" Check
-      if (!berg.nearMissAwarded && ahead < 10 && ahead > -25) {
-        const clearance = Math.abs(lateral) - (berg.collisionRadius + 9.0);
+      if (!berg.nearMissAwarded && ahead < 18 && ahead > -185) {
+        const clearance = Math.abs(lateral) - (berg.collisionRadius + 13.8);
         if (clearance > 0 && clearance < 17) {
           berg.nearMissAwarded = true;
           const pts = 250 * this.combo;
@@ -1184,101 +1639,72 @@ export class TitanicEngine {
   }
 
   // =========================================================================
-  // CAMERA RIG (Wheelhouse Helm vs Bridge Wing Overlook + Title Pan)
+  // CAMERA RIG (Title Harbor Sweep + Free 360° Orbit + Wheelhouse Helm)
   // =========================================================================
   private updateTitleCamera(): void {
-    const pan = Math.sin(this.simTime * 0.25);
-    const localCamX = pan * 0.48;
-    const localCamY = 12.78 + Math.cos(this.simTime * 0.35) * 0.05;
-    const localCamZ = 1.32;
+    // Graceful sunlit harbor vista from port-bow water framing Titanic & Berth 44 terminal
+    const drift = Math.sin(this.simTime * 0.18);
+    const camX = -98 + drift * 18;
+    const camY = 25.5 + Math.cos(this.simTime * 0.24) * 2.2;
+    const camZ = -108 + drift * 16;
 
-    this.camera.position.set(this.shipX + localCamX, localCamY, this.shipZ + localCamZ);
-    this.camera.lookAt(this.shipX + pan * 3.5, 11.1, this.shipZ - 68);
+    this.camera.position.set(this.shipX + camX, camY, this.shipZ + camZ);
+    this.camera.lookAt(this.shipX + 8, 15.0, this.shipZ + 38);
   }
 
   private updateCamera(dt: number): void {
-    this.lookYawOffset = THREE.MathUtils.damp(this.lookYawOffset, this.targetLookYaw, 8, dt);
-    this.lookPitchOffset = THREE.MathUtils.damp(this.lookPitchOffset, this.targetLookPitch, 8, dt);
+    const spec = VESSEL_SPOTS[this.focusSpotIndex];
+
+    // Smoothly damp focus position & spherical orbit coordinates
+    this.camFocusLocal.x = THREE.MathUtils.damp(this.camFocusLocal.x, spec.localTarget[0], 6, dt);
+    this.camFocusLocal.y = THREE.MathUtils.damp(this.camFocusLocal.y, spec.localTarget[1], 6, dt);
+    this.camFocusLocal.z = THREE.MathUtils.damp(this.camFocusLocal.z, spec.localTarget[2], 6, dt);
+    this.orbitYaw = THREE.MathUtils.damp(this.orbitYaw, this.targetOrbitYaw, 7, dt);
+    this.orbitPitch = THREE.MathUtils.damp(this.orbitPitch, this.targetOrbitPitch, 7, dt);
+    this.orbitDistance = THREE.MathUtils.damp(this.orbitDistance, this.targetOrbitDistance, 7, dt);
+
+    // Transform local ship spot into world space respecting hull trim/list & heading
+    const hullY = this.ship.hullMeshGroup.position.y;
+    const hullPitch = this.ship.hullMeshGroup.rotation.x;
+    const hullRoll = this.ship.hullMeshGroup.rotation.z;
+
+    _vFocusLocal.copy(this.camFocusLocal);
+    const pitchedY = _vFocusLocal.y - _vFocusLocal.z * Math.sin(hullPitch) + _vFocusLocal.x * Math.sin(hullRoll);
+    const worldY =
+      this.phase === 'sinking' || this.phase === 'gameover'
+        ? Math.max(-2.2, hullY + pitchedY)
+        : hullY + pitchedY;
 
     _vFwd.set(Math.sin(this.headingRad), 0, -Math.cos(this.headingRad));
     _vRight.set(Math.cos(this.headingRad), 0, Math.sin(this.headingRad));
 
-    if (this.phase === 'sinking' || this.phase === 'gameover') {
-      const hullY = this.ship.hullMeshGroup.position.y;
-      // Blend from flooding wheelhouse out to a dramatic lifeboat overlook as bridge submerges
-      const pullOut =
-        this.phase === 'gameover'
-          ? 1
-          : this.cameraMode === 'bridgeWing'
-            ? 1
-            : THREE.MathUtils.smoothstep(this.sinkProgress, 0.35, 0.62);
+    _vFocusWorld
+      .set(this.shipX, worldY, this.shipZ)
+      .addScaledVector(_vRight, _vFocusLocal.x)
+      .addScaledVector(_vFwd, -_vFocusLocal.z);
 
-      // Inside flooding wheelhouse
-      const whY = Math.max(1.2, 12.78 + hullY);
-      _vCamPos
-        .set(this.shipX, whY, this.shipZ)
-        .addScaledVector(_vFwd, -1.28);
+    // Compute unit look direction in ship-local frame, rotated by ship heading
+    const cosP = Math.cos(this.orbitPitch);
+    const localDirX = -Math.sin(this.orbitYaw) * cosP;
+    const localDirY = -Math.sin(this.orbitPitch);
+    const localDirZ = -Math.cos(this.orbitYaw) * cosP;
 
-      // Lifeboat overlook off the bow/bridge framing all 4 funnels & promenade lights
-      const lifeboatX = this.shipX + _vRight.x * (36 * this.listDirection) - _vFwd.x * 34;
-      const lifeboatZ = this.shipZ + _vRight.z * (36 * this.listDirection) - _vFwd.z * 34;
-      const lifeboatY = 14.5;
+    _vLookDir
+      .set(0, localDirY, 0)
+      .addScaledVector(_vRight, localDirX)
+      .addScaledVector(_vFwd, -localDirZ)
+      .normalize();
 
-      _vCamPos.x = THREE.MathUtils.lerp(_vCamPos.x, lifeboatX, pullOut);
-      _vCamPos.y = THREE.MathUtils.lerp(_vCamPos.y, lifeboatY, pullOut);
-      _vCamPos.z = THREE.MathUtils.lerp(_vCamPos.z, lifeboatZ, pullOut);
+    _vCamPos.copy(_vFocusWorld).addScaledVector(_vLookDir, -this.orbitDistance);
 
-      // Target: inside looks down the sinking forecastle; outside frames the full Titanic
-      const whTargetX = this.shipX + _vFwd.x * 50;
-      const whTargetY = Math.max(0.2, 7.5 + hullY - 12 * Math.abs(this.sinkPitch));
-      const whTargetZ = this.shipZ + _vFwd.z * 50;
-
-      const outTargetX = this.shipX + _vFwd.x * 8;
-      const outTargetY = Math.max(-2.5, 5.5 + hullY * 0.65);
-      const outTargetZ = this.shipZ + _vFwd.z * 8;
-
-      _vCamTarget.set(
-        THREE.MathUtils.lerp(whTargetX, outTargetX, pullOut),
-        THREE.MathUtils.lerp(whTargetY, outTargetY, pullOut),
-        THREE.MathUtils.lerp(whTargetZ, outTargetZ, pullOut),
-      );
-    } else if (this.cameraMode === 'wheelhouse') {
-      // Positioned inside wheelhouse behind rotating helm wheel (tracks hull trim)
-      const hullY = this.ship.hullMeshGroup.position.y;
-      _vCamPos
-        .set(this.shipX, 12.78 + hullY, this.shipZ)
-        .addScaledVector(_vFwd, -1.28)
-        .addScaledVector(_vRight, 0);
-
-      const lookYaw = this.headingRad - this.lookYawOffset;
-      _vCamTarget
-        .copy(_vCamPos)
-        .add(
-          _vLookPos.set(
-            Math.sin(lookYaw) * 55,
-            -3.6 + this.sinkPitch * 42 + this.lookPitchOffset * 28,
-            -Math.cos(lookYaw) * 55,
-          ),
-        );
-    } else {
-      // Starboard Bridge Wing / Quarter Overlook showing bow, lit portholes, lifeboats & funnels
-      const hullY = this.ship.hullMeshGroup.position.y;
-      _vCamPos
-        .set(this.shipX, 16.5 + hullY, this.shipZ)
-        .addScaledVector(_vFwd, -10.5)
-        .addScaledVector(_vRight, 13.8);
-
-      const lookYaw = this.headingRad - this.lookYawOffset * 0.8;
-      _vCamTarget
-        .set(this.shipX, 8.6 + hullY, this.shipZ)
-        .add(
-          _vLookPos.set(
-            Math.sin(lookYaw) * 65,
-            this.sinkPitch * 42 + this.lookPitchOffset * 24,
-            -Math.cos(lookYaw) * 65,
-          ),
-        );
+    // Keep exterior camera above the ocean waves
+    if (this.orbitDistance > 1.5 && _vCamPos.y < 1.25) {
+      _vCamPos.y = 1.25;
+    } else if (this.orbitDistance <= 1.5 && _vCamPos.y < 0.85) {
+      _vCamPos.y = 0.85;
     }
+
+    _vCamTarget.copy(_vCamPos).addScaledVector(_vLookDir, 40);
 
     // Apply decaying camera shake
     if (this.shakeIntensity > 0.001) {
@@ -1290,13 +1716,10 @@ export class TitanicEngine {
 
     this.camera.position.copy(_vCamPos);
     this.camera.lookAt(_vCamTarget);
-    // Subtle ship roll feel in wheelhouse view
-    const rollInfluence =
-      this.phase === 'sinking' || this.phase === 'gameover'
-        ? (1 - THREE.MathUtils.smoothstep(this.sinkProgress, 0.35, 0.62)) * 0.5
-        : this.cameraMode === 'wheelhouse'
-          ? 0.55
-          : 0.25;
+
+    // Subtle ship roll feel when standing inside wheelhouse
+    const isInterior = spec.id === 'wheelhouse' && this.orbitDistance < 2.2;
+    const rollInfluence = isInterior ? 0.55 : 0.08;
     this.camera.rotation.z += this.rollAngle * rollInfluence;
   }
 
@@ -1322,10 +1745,22 @@ export class TitanicEngine {
         : this.searchlightCooldown > 0
           ? this.searchlightCooldown / this.searchlightMaxCooldown
           : 0;
+    const spot = VESSEL_SPOTS[this.focusSpotIndex];
+    const p = this.timeSkipProgress;
+    const timeSkipDateLabel =
+      p < 0.25
+        ? 'APRIL 10, 1912 · ENGLISH CHANNEL · DEPARTING SOUTHAMPTON'
+        : p < 0.5
+          ? 'APRIL 11, 1912 · QUEENSTOWN, IRELAND · BOUND WESTWARD'
+          : p < 0.78
+            ? 'APRIL 12–13, 1912 · NORTH ATLANTIC · 21 KNOTS'
+            : 'APRIL 14, 1912 · 11:39 PM · APPROACHING ICE ALLEY';
 
     this.onTelemetry({
       phase: this.phase,
       cameraMode: this.cameraMode,
+      focusSpotId: spot.id,
+      focusSpotLabel: spot.label,
       headingDeg,
       rudderDeg: Math.round(this.rudderDeg),
       speedKnots: Math.round(this.speedKnots),
@@ -1337,6 +1772,12 @@ export class TitanicEngine {
       waterIngressRate: Number(this.waterIngressRate.toFixed(1)),
       compartmentsBreached: breached,
       sinkProgress: this.sinkProgress,
+      lifeboatsLaunched: this.lifeboatsLaunched,
+      harborChapterIndex: this.harborChapterIndex,
+      harborProgress: this.harborProgress,
+      harborAutoPlay: this.harborAutoPlay,
+      timeSkipProgress: this.timeSkipProgress,
+      timeSkipDateLabel,
       score: Math.round(this.score),
       bestScore: Math.max(this.bestScore, Math.round(this.score)),
       nearMissCount: this.nearMissCount,
@@ -1357,6 +1798,7 @@ export class TitanicEngine {
     this.unbindEvents();
     this.sound.dispose();
     this.ship.dispose();
+    this.harbor.dispose();
     this.oceanAndSky.dispose();
     this.iceFactory.dispose();
     this.particles.dispose();

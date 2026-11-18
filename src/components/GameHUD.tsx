@@ -11,7 +11,12 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { TELEGRAPH_NOTCHES, TelemetrySnapshot } from '../game/types';
+import {
+  TELEGRAPH_NOTCHES,
+  TelemetrySnapshot,
+  VESSEL_SPOTS,
+  VesselSpotId,
+} from '../game/types';
 
 interface GameHUDProps {
   telemetry: TelemetrySnapshot;
@@ -19,6 +24,7 @@ interface GameHUDProps {
   onSetRudder: (deg: number | null) => void;
   onTriggerSearchlight: () => void;
   onToggleCamera: () => void;
+  onFocusSpot: (spotId: VesselSpotId) => void;
   onTogglePause: () => void;
   onToggleMute: () => void;
   onSkipSinking: () => void;
@@ -35,6 +41,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onSetRudder,
   onTriggerSearchlight,
   onToggleCamera,
+  onFocusSpot,
   onTogglePause,
   onToggleMute,
   onSkipSinking,
@@ -137,8 +144,13 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
 
           {isSinking ? (
-            <div className="bg-[#450a0a]/92 border border-[#ef4444]/85 px-5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.2em] uppercase text-[#fecaca]">
-              ▲ BULKHEADS OVERWHELMED — SHIP SINKING
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <div className="bg-[#450a0a]/92 border border-[#ef4444]/85 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.18em] uppercase text-[#fecaca]">
+                ▲ BULKHEADS OVERWHELMED — SHIP SINKING
+              </div>
+              <div className="bg-[#071526]/92 border border-[#c99c43]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#f3d999] tabular-nums">
+                LIFEBOATS LOWERED: {telemetry.lifeboatsLaunched} / 16
+              </div>
             </div>
           ) : (
             <>
@@ -198,24 +210,40 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {/* BOTTOM BAR: SINKING CONTROLS vs COLLAPSIBLE HELM DOCK */}
       {isSinking ? (
-        <div className="flex justify-center">
-          <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-4 py-2 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onToggleCamera}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/50 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
-            >
-              <Camera className="w-3.5 h-3.5" />
-              {telemetry.cameraMode === 'wheelhouse' ? 'LIFEBOAT OVERLOOK [C]' : 'BRIDGE VIEW [C]'}
-            </button>
+        <div className="flex flex-col items-center gap-2">
+          <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-3.5 py-2 flex flex-wrap items-center justify-center gap-2 max-w-[95vw]">
+            <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-1">
+              FOCUS [S]:
+            </span>
+            {VESSEL_SPOTS.map((spot) => {
+              const active = telemetry.focusSpotId === spot.id;
+              return (
+                <button
+                  key={spot.id}
+                  type="button"
+                  onClick={() => onFocusSpot(spot.id)}
+                  className={`px-2 py-1 text-[10px] font-bold tracking-[0.12em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                      : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
+                  }`}
+                >
+                  {spot.shortLabel}
+                </button>
+              );
+            })}
+            <div className="h-4 w-[1px] bg-[#c99c43]/30 mx-1" />
             <button
               type="button"
               onClick={onSkipSinking}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#c7d6e6] border-[#c99c43]/35 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#c7d6e6] border-[#c99c43]/35 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
             >
               <FastForward className="w-3.5 h-3.5" />
               SKIP TO REPORT [SPACE]
             </button>
+          </div>
+          <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4]/85 bg-[#070e18]/75 px-3 py-0.5 rounded-sm">
+            Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · S to Focus Station
           </div>
         </div>
       ) : (
@@ -230,83 +258,112 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </button>
 
           {!dockCollapsed && (
-            <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-4 py-2.5 flex flex-wrap items-center justify-center gap-4 max-w-[94vw]">
-              {/* Helm Rudder Control */}
-              <div className="flex items-center gap-2.5">
-                <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4] w-16 text-right tabular-nums">
-                  {telemetry.rudderDeg === 0
-                    ? 'AMIDSHIPS'
-                    : telemetry.rudderDeg < 0
-                      ? `PORT ${Math.abs(telemetry.rudderDeg)}°`
-                      : `STBD ${telemetry.rudderDeg}°`}
+            <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-4 py-2.5 flex flex-col items-center gap-2 max-w-[96vw]">
+              <div className="flex flex-wrap items-center justify-center gap-3.5">
+                {/* Helm Rudder Control */}
+                <div className="flex items-center gap-2.5">
+                  <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4] w-16 text-right tabular-nums">
+                    {telemetry.rudderDeg === 0
+                      ? 'AMIDSHIPS'
+                      : telemetry.rudderDeg < 0
+                        ? `PORT ${Math.abs(telemetry.rudderDeg)}°`
+                        : `STBD ${telemetry.rudderDeg}°`}
+                  </div>
+                  <input
+                    type="range"
+                    min={-35}
+                    max={35}
+                    value={telemetry.rudderDeg}
+                    onChange={(e) => onSetRudder(Number(e.target.value))}
+                    onPointerUp={() => onSetRudder(null)}
+                    aria-label="Helm Rudder Angle"
+                    className="w-28 md:w-32 accent-[#c99c43] cursor-pointer"
+                  />
                 </div>
-                <input
-                  type="range"
-                  min={-35}
-                  max={35}
-                  value={telemetry.rudderDeg}
-                  onChange={(e) => onSetRudder(Number(e.target.value))}
-                  onPointerUp={() => onSetRudder(null)}
-                  aria-label="Helm Rudder Angle"
-                  className="w-28 md:w-36 accent-[#c99c43] cursor-pointer"
-                />
+
+                <div className="hidden md:block h-5 w-[1px] bg-[#c99c43]/30" />
+
+                {/* Chadburn Engine Order Telegraph */}
+                <div className="flex items-center gap-1">
+                  {TELEGRAPH_NOTCHES.map((notch, idx) => {
+                    const active = telemetry.telegraphIndex === idx;
+                    return (
+                      <button
+                        key={notch.id}
+                        type="button"
+                        onClick={() => onSelectTelegraph(idx)}
+                        className={`px-2 py-1 text-[10px] font-bold tracking-[0.12em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                            : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
+                        }`}
+                      >
+                        {notch.shortLabel}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="hidden md:block h-5 w-[1px] bg-[#c99c43]/30" />
+
+                {/* Searchlight Sweep & Quick Helm/Ship Toggle */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onTriggerSearchlight}
+                    disabled={telemetry.searchlightActive || telemetry.searchlightCooldownPct > 0}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer ${
+                      telemetry.searchlightActive
+                        ? 'bg-[#e0f2fe] text-[#08101c] border-[#bae6fd]'
+                        : telemetry.searchlightCooldownPct > 0
+                          ? 'bg-[#0b1626] text-[#64748b] border-[#334155] cursor-not-allowed'
+                          : 'bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/50'
+                    }`}
+                  >
+                    <Search className="w-3.5 h-3.5" />
+                    {telemetry.searchlightActive
+                      ? 'SWEEPING'
+                      : telemetry.searchlightCooldownPct > 0
+                        ? `COOLING ${Math.ceil(telemetry.searchlightCooldownPct * 8)}S`
+                        : 'SEARCHLIGHT [SPACE]'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={onToggleCamera}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/50 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    {telemetry.focusSpotId === 'wheelhouse' ? 'SHIP VIEW [C]' : 'HELM VIEW [C]'}
+                  </button>
+                </div>
               </div>
 
-              <div className="hidden md:block h-6 w-[1px] bg-[#c99c43]/30" />
-
-              {/* Chadburn Engine Order Telegraph */}
-              <div className="flex items-center gap-1">
-                {TELEGRAPH_NOTCHES.map((notch, idx) => {
-                  const active = telemetry.telegraphIndex === idx;
+              {/* Vessel Location Focus Selector Row */}
+              <div className="w-full pt-1.5 border-t border-[#c99c43]/20 flex flex-wrap items-center justify-center gap-1.5">
+                <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-1">
+                  STATION [S]:
+                </span>
+                {VESSEL_SPOTS.map((spot) => {
+                  const active = telemetry.focusSpotId === spot.id;
                   return (
                     <button
-                      key={notch.id}
+                      key={spot.id}
                       type="button"
-                      onClick={() => onSelectTelegraph(idx)}
-                      className={`px-2 py-1 text-[10px] font-bold tracking-[0.12em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
+                      onClick={() => onFocusSpot(spot.id)}
+                      className={`px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
                         active
                           ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
                           : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
                       }`}
                     >
-                      {notch.shortLabel}
+                      {spot.shortLabel}
                     </button>
                   );
                 })}
-              </div>
-
-              <div className="hidden md:block h-6 w-[1px] bg-[#c99c43]/30" />
-
-              {/* Searchlight Sweep & Camera Toggle */}
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onTriggerSearchlight}
-                  disabled={telemetry.searchlightActive || telemetry.searchlightCooldownPct > 0}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer ${
-                    telemetry.searchlightActive
-                      ? 'bg-[#e0f2fe] text-[#08101c] border-[#bae6fd]'
-                      : telemetry.searchlightCooldownPct > 0
-                        ? 'bg-[#0b1626] text-[#64748b] border-[#334155] cursor-not-allowed'
-                        : 'bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/50'
-                  }`}
-                >
-                  <Search className="w-3.5 h-3.5" />
-                  {telemetry.searchlightActive
-                    ? 'SWEEPING'
-                    : telemetry.searchlightCooldownPct > 0
-                      ? `COOLING ${Math.ceil(telemetry.searchlightCooldownPct * 8)}S`
-                      : 'SEARCHLIGHT [SPACE]'}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={onToggleCamera}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/50 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  {telemetry.cameraMode === 'wheelhouse' ? 'WING VIEW [C]' : 'HELM VIEW [C]'}
-                </button>
+                <span className="hidden lg:inline text-[10px] tracking-[0.12em] uppercase text-[#88a0b8] ml-2">
+                  · Drag Mouse to Orbit · Scroll to Zoom
+                </span>
               </div>
             </div>
           )}

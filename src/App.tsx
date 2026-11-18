@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { EndModal } from './components/EndModal';
 import { GameHUD } from './components/GameHUD';
+import { HarborOverlay } from './components/HarborOverlay';
 import { TitleOverlay } from './components/TitleOverlay';
 import { TitanicEngine } from './game/TitanicEngine';
 import { TARGET_VOYAGE_NM, TelemetrySnapshot } from './game/types';
@@ -8,10 +9,12 @@ import { TARGET_VOYAGE_NM, TelemetrySnapshot } from './game/types';
 const INITIAL_TELEMETRY: TelemetrySnapshot = {
   phase: 'title',
   cameraMode: 'wheelhouse',
+  focusSpotId: 'wheelhouse',
+  focusSpotLabel: 'Wheelhouse Helm',
   headingDeg: 0,
   rudderDeg: 0,
-  speedKnots: 14,
-  telegraphIndex: 4,
+  speedKnots: 0,
+  telegraphIndex: 2,
   distanceNm: 0,
   targetDistanceNm: TARGET_VOYAGE_NM,
   hullIntegrity: 100,
@@ -19,6 +22,12 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   waterIngressRate: 0,
   compartmentsBreached: 0,
   sinkProgress: 0,
+  lifeboatsLaunched: 0,
+  harborChapterIndex: 0,
+  harborProgress: 0,
+  harborAutoPlay: true,
+  timeSkipProgress: 0,
+  timeSkipDateLabel: 'APRIL 10, 1912 · SOUTHAMPTON',
   score: 0,
   bestScore: 0,
   nearMissCount: 0,
@@ -54,6 +63,13 @@ export default function App() {
     };
   }, []);
 
+  const showGameHud =
+    telemetry.phase === 'playing' ||
+    telemetry.phase === 'paused' ||
+    telemetry.phase === 'sinking' ||
+    telemetry.phase === 'victory' ||
+    telemetry.phase === 'gameover';
+
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-[#050b14]">
       {/* Isolated WebGL Mount Container — React UI updates never tear down or re-render the canvas */}
@@ -74,17 +90,31 @@ export default function App() {
       {telemetry.phase === 'title' && (
         <TitleOverlay
           bestScore={telemetry.bestScore}
-          onStart={() => engineRef.current?.startGame()}
+          onStart={() => engineRef.current?.startHarborIntro()}
+          onSkipToNight={() => engineRef.current?.startGame()}
         />
       )}
 
-      {telemetry.phase !== 'title' && (
+      {(telemetry.phase === 'harbor' || telemetry.phase === 'timeskip') && (
+        <HarborOverlay
+          telemetry={telemetry}
+          onSelectChapter={(idx) => engineRef.current?.setHarborChapter(idx)}
+          onPrevChapter={() => engineRef.current?.prevHarborChapter()}
+          onNextChapter={() => engineRef.current?.nextHarborChapter()}
+          onToggleAutoPlay={() => engineRef.current?.toggleHarborAutoPlay()}
+          onSkipToNight={() => engineRef.current?.skipHarborToNight()}
+          onToggleMute={() => engineRef.current?.toggleMute()}
+        />
+      )}
+
+      {showGameHud && (
         <GameHUD
           telemetry={telemetry}
           onSelectTelegraph={(idx) => engineRef.current?.setTelegraphIndex(idx)}
           onSetRudder={(deg) => engineRef.current?.setManualRudder(deg)}
           onTriggerSearchlight={() => engineRef.current?.triggerSearchlight()}
           onToggleCamera={() => engineRef.current?.toggleCameraMode()}
+          onFocusSpot={(spotId) => engineRef.current?.focusVesselSpot(spotId)}
           onTogglePause={() => engineRef.current?.togglePause()}
           onToggleMute={() => engineRef.current?.toggleMute()}
           onSkipSinking={() => engineRef.current?.skipSinking()}
