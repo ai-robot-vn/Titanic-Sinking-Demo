@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { EndModal } from './components/EndModal';
 import { GameHUD } from './components/GameHUD';
-import { HarborOverlay } from './components/HarborOverlay';
 import { TitleOverlay } from './components/TitleOverlay';
 import { TitanicEngine } from './game/TitanicEngine';
 import { TARGET_VOYAGE_NM, TelemetrySnapshot } from './game/types';
@@ -11,10 +10,11 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   cameraMode: 'wheelhouse',
   focusSpotId: 'wheelhouse',
   focusSpotLabel: 'Wheelhouse Helm',
+  focusSpotCategory: 'exterior',
   headingDeg: 0,
   rudderDeg: 0,
   speedKnots: 0,
-  telegraphIndex: 2,
+  telegraphIndex: 1,
   distanceNm: 0,
   targetDistanceNm: TARGET_VOYAGE_NM,
   hullIntegrity: 100,
@@ -29,12 +29,15 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   carpathiaDistanceM: 460,
   survivorsRescued: 0,
   boatsRecovered: 0,
+  warshipRescuing: false,
+  warshipSurvivors: 0,
+  warshipBoatsRecovered: 0,
+  activeSubmarines: 0,
+  submarinesSunk: 0,
   focusCarpathia: false,
-  harborChapterIndex: 0,
-  harborProgress: 0,
-  harborAutoPlay: true,
-  timeSkipProgress: 0,
-  timeSkipDateLabel: 'APRIL 10, 1912 · SOUTHAMPTON',
+  aftermathFocus: 'lifeboats',
+  inHarborZone: true,
+  zoneLabel: 'SOUTHAMPTON BERTH 44 & CHANNEL',
   score: 0,
   bestScore: 0,
   nearMissCount: 0,
@@ -43,6 +46,8 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   searchlightCooldownPct: 0,
   icebergWarning: null,
   lastEventText: null,
+  autopilotEnabled: false,
+  bowPanicActive: false,
   endlessMode: false,
   isMuted: false,
 };
@@ -83,7 +88,7 @@ export default function App() {
       {/* Isolated WebGL Mount Container — React UI updates never tear down or re-render the canvas */}
       <div ref={canvasMountRef} className="absolute inset-0 w-full h-full" />
 
-      {/* Brief Crimson Impact Vignette on Iceberg Collision */}
+      {/* Brief Crimson Impact Vignette on Collision */}
       {damageFlash > 0.01 && (
         <div
           className="fixed inset-0 pointer-events-none z-20"
@@ -98,20 +103,8 @@ export default function App() {
       {telemetry.phase === 'title' && (
         <TitleOverlay
           bestScore={telemetry.bestScore}
-          onStart={() => engineRef.current?.startHarborIntro()}
-          onSkipToNight={() => engineRef.current?.startGame()}
-        />
-      )}
-
-      {(telemetry.phase === 'harbor' || telemetry.phase === 'timeskip') && (
-        <HarborOverlay
-          telemetry={telemetry}
-          onSelectChapter={(idx) => engineRef.current?.setHarborChapter(idx)}
-          onPrevChapter={() => engineRef.current?.prevHarborChapter()}
-          onNextChapter={() => engineRef.current?.nextHarborChapter()}
-          onToggleAutoPlay={() => engineRef.current?.toggleHarborAutoPlay()}
-          onSkipToNight={() => engineRef.current?.skipHarborToNight()}
-          onToggleMute={() => engineRef.current?.toggleMute()}
+          onStart={() => engineRef.current?.startGame()}
+          onStartNight={() => engineRef.current?.startNightVoyage()}
         />
       )}
 
@@ -120,6 +113,7 @@ export default function App() {
           telemetry={telemetry}
           onSelectTelegraph={(idx) => engineRef.current?.setTelegraphIndex(idx)}
           onSetRudder={(deg) => engineRef.current?.setManualRudder(deg)}
+          onToggleAutopilot={() => engineRef.current?.toggleAutopilot()}
           onTriggerSearchlight={() => engineRef.current?.triggerSearchlight()}
           onToggleCamera={() => engineRef.current?.toggleCameraMode()}
           onFocusSpot={(spotId) => engineRef.current?.focusVesselSpot(spotId)}
@@ -127,7 +121,7 @@ export default function App() {
           onToggleMute={() => engineRef.current?.toggleMute()}
           onSkipSinking={() => engineRef.current?.skipSinking()}
           onFastForwardRescue={() => engineRef.current?.fastForwardRescueWait()}
-          onFocusCarpathia={(enable) => engineRef.current?.focusOnCarpathia(enable)}
+          onFocusAftermath={(target) => engineRef.current?.focusAftermathTarget(target)}
           onOpenReport={() => engineRef.current?.openVoyageReport()}
           onRestart={() => engineRef.current?.startGame()}
         />

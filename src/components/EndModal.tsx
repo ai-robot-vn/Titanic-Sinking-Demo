@@ -47,12 +47,14 @@ export const EndModal: React.FC<EndModalProps> = ({
             : isVictory
               ? 'You guided RMS Titanic cleanly past the North Atlantic ice barrier with hull integrity intact.'
               : telemetry.carpathiaStage === 'complete'
-                ? 'Titanic broke amidships and sank beneath the Atlantic, but RMS Carpathia arrived on scene and rescued all 712 survivors from the 16 lifeboats.'
+                ? `Titanic broke amidships and sank beneath the Atlantic, while the Royal Navy Escort Warships${telemetry.submarinesSunk > 0 ? ` sank ${telemetry.submarinesSunk} attacking submarine(s)` : ''} and RMS Carpathia rescued all 712 survivors from the 16 lifeboats.`
                 : telemetry.carpathiaStage === 'boarding'
-                  ? `Titanic sank beneath the Atlantic. RMS Carpathia is alongside with ladders lowered (${telemetry.survivorsRescued} / 712 survivors aboard so far).`
+                  ? `Titanic sank beneath the Atlantic. Both the Escort Warships and RMS Carpathia are alongside with boarding ladders lowered (${telemetry.survivorsRescued} / 712 survivors aboard so far)${telemetry.submarinesSunk > 0 ? `, after driving off and sinking ${telemetry.submarinesSunk} hostile submarine(s)` : ''}.`
                   : telemetry.carpathiaStage === 'approaching'
-                    ? 'Titanic sank beneath the Atlantic. RMS Carpathia has sighted the distress flares and is steaming slowly toward the 16 lifeboats.'
-                    : 'Titanic broke amidships and slipped beneath the freezing Atlantic while 16 lifeboats pulled away to await rescue.'}
+                    ? `Titanic sank beneath the Atlantic. The Escort Warships have already brought ${telemetry.warshipSurvivors} survivors aboard while RMS Carpathia steams toward the remaining boats.`
+                    : telemetry.warshipRescuing
+                      ? `Titanic slipped beneath the waves. The following Escort Warships moved onto station and are rescuing lifeboats (${telemetry.warshipSurvivors} / 356 aboard) ahead of RMS Carpathia's arrival.`
+                      : 'Titanic broke amidships and slipped beneath the freezing Atlantic while 16 lifeboats pulled away and the Escort Warships moved in to carry out a rescue.'}
         </p>
 
         {/* Voyage Summary Readout */}

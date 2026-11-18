@@ -9,12 +9,14 @@ import {
   Droplets,
   FastForward,
   LifeBuoy,
+  Navigation,
   Pause,
   Search,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import {
+  AftermathFocusTarget,
   TELEGRAPH_NOTCHES,
   TelemetrySnapshot,
   VESSEL_SPOTS,
@@ -25,6 +27,7 @@ interface GameHUDProps {
   telemetry: TelemetrySnapshot;
   onSelectTelegraph: (idx: number) => void;
   onSetRudder: (deg: number | null) => void;
+  onToggleAutopilot: () => void;
   onTriggerSearchlight: () => void;
   onToggleCamera: () => void;
   onFocusSpot: (spotId: VesselSpotId) => void;
@@ -32,7 +35,7 @@ interface GameHUDProps {
   onToggleMute: () => void;
   onSkipSinking: () => void;
   onFastForwardRescue: () => void;
-  onFocusCarpathia: (enable: boolean) => void;
+  onFocusAftermath: (target: AftermathFocusTarget) => void;
   onOpenReport: () => void;
   onRestart: () => void;
 }
@@ -53,6 +56,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   telemetry,
   onSelectTelegraph,
   onSetRudder,
+  onToggleAutopilot,
   onTriggerSearchlight,
   onToggleCamera,
   onFocusSpot,
@@ -60,7 +64,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onToggleMute,
   onSkipSinking,
   onFastForwardRescue,
-  onFocusCarpathia,
+  onFocusAftermath,
   onOpenReport,
   onRestart,
 }) => {
@@ -145,11 +149,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             </div>
           )}
 
-          <div className="flex items-center justify-between text-[11px] text-[#e7dcc0] tabular-nums">
-            <span className="text-[#9fb2c7] uppercase tracking-wider text-[10px]">
-              {telemetry.endlessMode ? 'ENDLESS WATCH' : 'ICE ALLEY'}
+          <div className="flex items-center justify-between gap-2 text-[11px] text-[#e7dcc0] tabular-nums">
+            <span className="text-[#9fb2c7] uppercase tracking-wider text-[10px] truncate max-w-[140px]">
+              {telemetry.endlessMode ? 'ENDLESS WATCH' : telemetry.zoneLabel}
             </span>
-            <span className="font-semibold">
+            <span className="font-semibold shrink-0">
               {telemetry.distanceNm.toFixed(1)}
               {!telemetry.endlessMode && ` / ${telemetry.targetDistanceNm.toFixed(0)} NM`}
               {telemetry.endlessMode && ' NM'}
@@ -183,12 +187,20 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <div className="flex flex-wrap items-center justify-center gap-2">
               {telemetry.carpathiaStage === 'waiting' && (
                 <>
+                  {telemetry.warshipRescuing ? (
+                    <div className="bg-[#071f24]/92 border border-[#34d399]/70 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5 tabular-nums">
+                      <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
+                      ESCORT WARSHIP RESCUING · {telemetry.warshipSurvivors} / 356 ABOARD ({telemetry.warshipBoatsRecovered} / 8 BOATS)
+                    </div>
+                  ) : (
+                    <div className="bg-[#071829]/92 border border-[#38bdf8]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#bae6fd] flex items-center gap-1.5 tabular-nums">
+                      <Anchor className="w-3.5 h-3.5 text-[#38bdf8]" />
+                      ESCORT WARSHIP CLOSING IN · LIFEBOATS: {telemetry.lifeboatsLaunched} / 16
+                    </div>
+                  )}
                   <div className="bg-[#070e18]/92 border border-[#c99c43]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#e6c373] flex items-center gap-1.5 tabular-nums">
                     <Clock className="w-3.5 h-3.5 text-[#d8b467]" />
                     RMS CARPATHIA ARRIVES IN {formatCountdown(telemetry.carpathiaEtaSec)}
-                  </div>
-                  <div className="bg-[#071526]/92 border border-[#c99c43]/50 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#c7d6e6] tabular-nums">
-                    LIFEBOATS ADRIFT: {telemetry.lifeboatsLaunched} / 16
                   </div>
                 </>
               )}
@@ -199,8 +211,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                     <Anchor className="w-3.5 h-3.5 text-[#38bdf8]" />
                     RMS CARPATHIA APPROACHING SLOWLY · {telemetry.carpathiaDistanceM} M
                   </div>
-                  <div className="bg-[#071526]/92 border border-[#c99c43]/50 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#c7d6e6] tabular-nums">
-                    LIFEBOATS ADRIFT: {telemetry.lifeboatsLaunched} / 16
+                  <div className="bg-[#071526]/92 border border-[#c99c43]/55 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#f3d999] tabular-nums">
+                    WARSHIP ABOARD: {telemetry.survivorsRescued} / 712 · BOATS: {telemetry.boatsRecovered} / 16
                   </div>
                 </>
               )}
@@ -209,7 +221,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 <>
                   <div className="bg-[#071f24]/92 border border-[#34d399]/70 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5">
                     <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
-                    RESCUE IN PROGRESS — BOARDING PASSENGERS
+                    JOINT RESCUE IN PROGRESS — WARSHIP &amp; CARPATHIA BOARDING
                   </div>
                   <div className="bg-[#071526]/92 border border-[#c99c43]/60 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#f3d999] tabular-nums">
                     SURVIVORS ABOARD: {telemetry.survivorsRescued} / 712 · BOATS: {telemetry.boatsRecovered} / 16
@@ -221,12 +233,22 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 <>
                   <div className="bg-[#071f1a]/92 border border-[#34d399]/75 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5">
                     <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
-                    RESCUE COMPLETE — 712 SURVIVORS ABOARD RMS CARPATHIA
+                    RESCUE COMPLETE — 712 SURVIVORS ABOARD WARSHIP &amp; CARPATHIA
                   </div>
                   <div className="bg-[#071526]/92 border border-[#c99c43]/55 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#e6c373] tabular-nums">
                     ALL {telemetry.boatsRecovered} LIFEBOATS RECOVERED
                   </div>
                 </>
+              )}
+              {telemetry.activeSubmarines > 0 && (
+                <div className="bg-[#450a0a]/92 border border-[#ef4444]/85 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#fecaca] tabular-nums">
+                  ▲ {telemetry.activeSubmarines} U-BOAT(S) FIRING ON CARPATHIA — WARSHIPS RETURNING FIRE
+                </div>
+              )}
+              {telemetry.activeSubmarines === 0 && telemetry.submarinesSunk > 0 && (
+                <div className="bg-[#071526]/92 border border-[#c99c43]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#e6c373] tabular-nums">
+                  {telemetry.submarinesSunk} SUBMARINE(S) SUNK BY WARSHIPS
+                </div>
               )}
             </div>
           ) : (
@@ -237,9 +259,33 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </div>
               )}
 
+              {telemetry.activeSubmarines > 0 && !telemetry.icebergWarning && !telemetry.lastEventText && (
+                <div className="bg-[#450a0a]/90 border border-[#ef4444]/80 px-4 py-1 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#fecaca] tabular-nums">
+                  ▲ {telemetry.activeSubmarines} U-BOAT(S) FIRING — ESCORT WARSHIPS RETURNING FIRE
+                </div>
+              )}
+
+              {telemetry.bowPanicActive && !telemetry.lastEventText && (
+                <div className="bg-[#450a0a]/90 border border-[#f87171]/75 px-4 py-1 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#fecaca]">
+                  ▲ PASSENGERS PANICKING — RUSHING TO THE BOW
+                </div>
+              )}
+
+              {telemetry.autopilotEnabled && !telemetry.lastEventText && !telemetry.icebergWarning && telemetry.activeSubmarines === 0 && (
+                <div className="bg-[#07261f]/90 border border-[#34d399]/70 px-4 py-1 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0]">
+                  AUTOPILOT ACTIVE — WHEELHOUSE CREW AT THE HELM [A]
+                </div>
+              )}
+
               {telemetry.lastEventText && !telemetry.icebergWarning && (
                 <div className="bg-[#081526]/90 border border-[#c99c43]/60 px-4 py-1 rounded-sm text-[11px] font-semibold tracking-[0.16em] uppercase text-[#f3d999]">
                   {telemetry.lastEventText}
+                </div>
+              )}
+
+              {!telemetry.icebergWarning && !telemetry.lastEventText && !telemetry.autopilotEnabled && !telemetry.bowPanicActive && telemetry.activeSubmarines === 0 && telemetry.focusSpotCategory === 'interior' && (
+                <div className="bg-[#070e18]/82 border border-[#c99c43]/40 px-3.5 py-1 rounded-sm text-[10px] font-semibold tracking-[0.16em] uppercase text-[#d8b467]">
+                  {telemetry.focusSpotLabel} · I / J / K / L Walk Deck · Drag Look
                 </div>
               )}
             </>
@@ -288,7 +334,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       {/* BOTTOM BAR: SINKING / AFTERMATH CONTROLS vs COLLAPSIBLE HELM DOCK */}
       {isSinking ? (
         <div className="flex flex-col items-center gap-2">
-          <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-3.5 py-2 flex flex-wrap items-center justify-center gap-2 max-w-[95vw]">
+          <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-3.5 py-2 flex flex-wrap items-center justify-center gap-1.5 max-w-[95vw]">
             <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-1">
               FOCUS [S]:
             </span>
@@ -299,10 +345,12 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                   key={spot.id}
                   type="button"
                   onClick={() => onFocusSpot(spot.id)}
-                  className={`px-2 py-1 text-[10px] font-bold tracking-[0.12em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
+                  className={`px-2 py-0.5 text-[9px] font-bold tracking-[0.11em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
                     active
                       ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
-                      : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
+                      : spot.category === 'interior'
+                        ? 'bg-[#101c2d] text-[#e6c373] border-[#c99c43]/30 hover:border-[#c99c43]/70'
+                        : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
                   }`}
                 >
                   {spot.shortLabel}
@@ -326,43 +374,69 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       ) : isAftermath ? (
         <div className="flex flex-col items-center gap-2">
           <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/55 rounded-sm px-4 py-2.5 flex flex-wrap items-center justify-center gap-2.5 max-w-[95vw]">
-            {telemetry.carpathiaStage === 'waiting' ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-0.5">
+                FOCUS:
+              </span>
               <button
                 type="button"
-                onClick={onFastForwardRescue}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#bae6fd] border-[#38bdf8]/45 text-[11px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
+                onClick={() => onFocusAftermath('lifeboats')}
+                className={`px-2.5 py-1 rounded-[2px] border text-[10px] font-bold tracking-[0.12em] uppercase transition-colors cursor-pointer ${
+                  telemetry.aftermathFocus === 'lifeboats'
+                    ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                    : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/30 hover:border-[#c99c43]/60'
+                }`}
               >
-                <FastForward className="w-3.5 h-3.5" />
-                SKIP 1-MIN WAIT
+                LIFEBOAT CLUSTER
               </button>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-0.5">
-                  FOCUS:
-                </span>
+              <button
+                type="button"
+                onClick={() => onFocusAftermath('warship')}
+                className={`px-2.5 py-1 rounded-[2px] border text-[10px] font-bold tracking-[0.12em] uppercase transition-colors cursor-pointer ${
+                  telemetry.aftermathFocus === 'warship'
+                    ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                    : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/30 hover:border-[#c99c43]/60'
+                }`}
+              >
+                ESCORT WARSHIPS
+              </button>
+              {telemetry.activeSubmarines > 0 && (
                 <button
                   type="button"
-                  onClick={() => onFocusCarpathia(false)}
+                  onClick={() => onFocusAftermath('submarines')}
                   className={`px-2.5 py-1 rounded-[2px] border text-[10px] font-bold tracking-[0.12em] uppercase transition-colors cursor-pointer ${
-                    !telemetry.focusCarpathia
-                      ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
-                      : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/30 hover:border-[#c99c43]/60'
+                    telemetry.aftermathFocus === 'submarines'
+                      ? 'bg-[#ef4444] text-[#ffffff] border-[#fca5a5]'
+                      : 'bg-[#2a0a0a] text-[#fecaca] border-[#ef4444]/50 hover:border-[#ef4444]'
                   }`}
                 >
-                  LIFEBOAT CLUSTER
+                  U-BOATS ({telemetry.activeSubmarines})
                 </button>
+              )}
+              {telemetry.carpathiaStage !== 'waiting' && (
                 <button
                   type="button"
-                  onClick={() => onFocusCarpathia(true)}
+                  onClick={() => onFocusAftermath('carpathia')}
                   className={`px-2.5 py-1 rounded-[2px] border text-[10px] font-bold tracking-[0.12em] uppercase transition-colors cursor-pointer ${
-                    telemetry.focusCarpathia
+                    telemetry.aftermathFocus === 'carpathia'
                       ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
                       : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/30 hover:border-[#c99c43]/60'
                   }`}
                 >
                   RMS CARPATHIA
                 </button>
-              </div>
+              )}
+            </div>
+
+            {telemetry.carpathiaStage === 'waiting' && (
+              <button
+                type="button"
+                onClick={onFastForwardRescue}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#bae6fd] border-[#38bdf8]/45 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
+              >
+                <FastForward className="w-3.5 h-3.5" />
+                SKIP TO CARPATHIA
+              </button>
             )}
             <div className="h-4 w-[1px] bg-[#c99c43]/30" />
             <button
@@ -382,12 +456,14 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
           <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4]/85 bg-[#070e18]/75 px-3 py-0.5 rounded-sm">
             {telemetry.carpathiaStage === 'waiting'
-              ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Lifeboats Sending Distress Flares'
+              ? telemetry.warshipRescuing
+                ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Escort Warship Boarding Lifeboats While Carpathia Approaches'
+                : 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Escort Warship Steaming In to Rescue Survivors'
               : telemetry.carpathiaStage === 'approaching'
                 ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · RMS Carpathia Steaming Toward Survivors'
                 : telemetry.carpathiaStage === 'boarding'
-                  ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Lifeboats Rowing Alongside Boarding Ladders'
-                  : 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Survivors Safely Aboard RMS Carpathia'}
+                  ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Lifeboats Boarding Warship & Carpathia Ladders'
+                  : 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · All 712 Survivors Safely Aboard Warship & Carpathia'}
           </div>
         </div>
       ) : (
@@ -450,8 +526,21 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
                 <div className="hidden md:block h-5 w-[1px] bg-[#c99c43]/30" />
 
-                {/* Searchlight Sweep & Quick Helm/Ship Toggle */}
+                {/* Autopilot, Searchlight Sweep & Quick Helm/Ship Toggle */}
                 <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onToggleAutopilot}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-[2px] border text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer ${
+                      telemetry.autopilotEnabled
+                        ? 'bg-[#10b981] text-[#051812] border-[#6ee7b7]'
+                        : 'bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/50'
+                    }`}
+                  >
+                    <Navigation className="w-3.5 h-3.5" />
+                    {telemetry.autopilotEnabled ? 'AUTOPILOT ON [A]' : 'AUTOPILOT [A]'}
+                  </button>
+
                   <button
                     type="button"
                     onClick={onTriggerSearchlight}
@@ -483,31 +572,54 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </div>
               </div>
 
-              {/* Vessel Location Focus Selector Row */}
-              <div className="w-full pt-1.5 border-t border-[#c99c43]/20 flex flex-wrap items-center justify-center gap-1.5">
-                <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-1">
-                  STATION [S]:
-                </span>
-                {VESSEL_SPOTS.map((spot) => {
-                  const active = telemetry.focusSpotId === spot.id;
-                  return (
-                    <button
-                      key={spot.id}
-                      type="button"
-                      onClick={() => onFocusSpot(spot.id)}
-                      className={`px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
-                          : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
-                      }`}
-                    >
-                      {spot.shortLabel}
-                    </button>
-                  );
-                })}
-                <span className="hidden lg:inline text-[10px] tracking-[0.12em] uppercase text-[#88a0b8] ml-2">
-                  · Drag Mouse to Orbit · Scroll to Zoom
-                </span>
+              {/* Vessel Location & Accessible Interior Decks Selector */}
+              <div className="w-full pt-1.5 border-t border-[#c99c43]/20 flex flex-col items-center gap-1.5">
+                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                  <span className="text-[9px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-0.5">
+                    EXTERIOR:
+                  </span>
+                  {VESSEL_SPOTS.filter((s) => s.category === 'exterior').map((spot) => {
+                    const active = telemetry.focusSpotId === spot.id;
+                    return (
+                      <button
+                        key={spot.id}
+                        type="button"
+                        onClick={() => onFocusSpot(spot.id)}
+                        className={`px-2 py-0.5 text-[10px] font-semibold tracking-[0.11em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                            : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/25 hover:border-[#c99c43]/60'
+                        }`}
+                      >
+                        {spot.shortLabel}
+                      </button>
+                    );
+                  })}
+                  <span className="hidden sm:inline text-[#c99c43]/40 mx-1">|</span>
+                  <span className="text-[9px] tracking-[0.15em] uppercase text-[#d8b467] mr-0.5">
+                    INTERIOR DECKS:
+                  </span>
+                  {VESSEL_SPOTS.filter((s) => s.category === 'interior').map((spot) => {
+                    const active = telemetry.focusSpotId === spot.id;
+                    return (
+                      <button
+                        key={spot.id}
+                        type="button"
+                        onClick={() => onFocusSpot(spot.id)}
+                        className={`px-2 py-0.5 text-[10px] font-semibold tracking-[0.11em] uppercase rounded-[2px] border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                            : 'bg-[#101d30] text-[#e6c373] border-[#c99c43]/35 hover:border-[#c99c43]/75'
+                        }`}
+                      >
+                        {spot.shortLabel}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="text-[9px] tracking-[0.14em] uppercase text-[#8ea5be] text-center">
+                  A Autopilot &nbsp;·&nbsp; ← / → (Q / E) Rudder &nbsp;·&nbsp; W / X Telegraph &nbsp;·&nbsp; I / J / K / L Walk Deck &nbsp;·&nbsp; S Switch Deck &nbsp;·&nbsp; Drag Look
+                </div>
               </div>
             </div>
           )}

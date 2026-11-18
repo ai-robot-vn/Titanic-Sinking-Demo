@@ -3,6 +3,29 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export type CharacterRole = 'officer' | 'lookout' | 'gentleman' | 'lady';
 export type CharacterGait = 'idle' | 'walk' | 'run';
+export type CharacterPersonality = 'calm' | 'curious' | 'social' | 'dutiful';
+export type CharacterIntent =
+  | 'stroll'
+  | 'converse'
+  | 'rail_watch'
+  | 'brace'
+  | 'assist'
+  | 'muster_run'
+  | 'hold_bow';
+
+export interface CruiseAwarenessContext {
+  shipRoll?: number;
+  shipPitch?: number;
+  harborNear?: boolean;
+  hazardSide?: number; // -1 port, 0 none, +1 starboard
+  playerLocalX?: number;
+  playerLocalY?: number;
+  playerLocalZ?: number;
+  bridgeOrderActive?: boolean;
+  autopilotActive?: boolean;
+  rudderDeg?: number;
+  bowPanicActive?: boolean;
+}
 
 export interface DeckWaypoint {
   x: number;
@@ -28,8 +51,15 @@ export interface DeckCharacter {
   lifejacket: THREE.Group;
   role: CharacterRole;
   gait: CharacterGait;
+  personality: CharacterPersonality;
+  panicThreshold: number;
+  intent: CharacterIntent;
+  decisionTimer: number;
+  gazeYaw: number;
   route: DeckWaypoint[];
   musterTarget: DeckWaypoint | null;
+  bowTarget?: DeckWaypoint | null;
+  helmStation?: { x: number; y: number; z: number; yaw: number; role: 'helmsman' | 'watch_officer' } | null;
   waypointIdx: number;
   pauseTimer: number;
   walkSpeed: number;
@@ -61,18 +91,45 @@ export interface LifeboatRig {
   rescued: boolean;
   splashX: number;
   splashZ: number;
+  boatX: number;
+  boatZ: number;
+  boatYaw: number;
 }
 
 export interface RescueProgressResult {
   boatsRecovered: number;
   survivorsRescued: number;
+  warshipBoatsRecovered: number;
+  warshipSurvivorsRescued: number;
+  carpathiaBoatsRecovered: number;
+  carpathiaSurvivorsRescued: number;
+}
+
+export interface WarshipRescueContext {
+  active: boolean;
+  progress: number;
+  root: THREE.Group;
+  boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>;
+}
+
+export interface FloatingLifeboatHazard {
+  index: number;
+  x: number;
+  z: number;
+  radius: number;
 }
 
 export interface CrewAndLifeboatSystem {
   characters: DeckCharacter[];
   totalCharacterCount: number;
   lifeboats: LifeboatRig[];
-  updateCruising: (time: number, dt: number, floodingPct: number) => void;
+  updateCruising: (
+    time: number,
+    dt: number,
+    floodingPct: number,
+    shipRoot?: THREE.Group,
+    awareness?: CruiseAwarenessContext,
+  ) => void;
   updateSinking: (
     time: number,
     dt: number,
@@ -87,7 +144,9 @@ export interface CrewAndLifeboatSystem {
     carpathiaRoot: THREE.Group,
     boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>,
     shipRoot: THREE.Group,
+    warshipRescue?: WarshipRescueContext,
   ) => RescueProgressResult;
+  getFloatingLifeboats: (out: FloatingLifeboatHazard[]) => void;
   reset: () => void;
   setLanternPower: (power: number) => void;
   dispose: () => void;
@@ -99,6 +158,12 @@ interface CrowdActor {
   kind: CrowdKind;
   allIdx: number;
   roleIdx: number;
+  personality: CharacterPersonality;
+  panicThreshold: number;
+  intent: CharacterIntent;
+  decisionTimer: number;
+  gazeYaw: number;
+  peerYaw: number;
   startX: number;
   startY: number;
   startZ: number;
@@ -108,6 +173,10 @@ interface CrowdActor {
   musterX: number;
   musterY: number;
   musterZ: number;
+  bowPanicX: number;
+  bowPanicY: number;
+  bowPanicZ: number;
+  bowPanicYaw: number;
   posX: number;
   posY: number;
   posZ: number;
@@ -124,7 +193,7 @@ interface CrowdActor {
   scaleW: number;
 }
 
-// Pre-allocated math helpers (zero per-frame GC across all 1,000 characters)
+// Pre-allocated math helpers & zero-GC spatial hash grid for 1,000-character awareness
 const _tmpWorldPos = new THREE.Vector3();
 const _vPos = new THREE.Vector3();
 const _vScale = new THREE.Vector3();
@@ -136,6 +205,11 @@ const _headMat = new THREE.Matrix4();
 const _localMat = new THREE.Matrix4();
 const _partMat = new THREE.Matrix4();
 const _zeroMat = new THREE.Matrix4().makeScale(0, 0, 0);
+
+const GRID_COLS = 12; // x in [-18, +18] -> 3m per cell
+const GRID_ROWS = 96; // z in [-78, +210] -> 3m per cell
+const _gridHead = new Int32Array(GRID_COLS * GRID_ROWS);
+const _gridNext = new Int32Array(700);
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -784,6 +858,7 @@ export function createCrewAndLifeboats(
     const targetParent = start.z < breakZ ? bowContent : sternContent;
     targetParent.add(group);
 
+    const personalityList: CharacterPersonality[] = ['dutiful', 'curious', 'calm', 'social'];
     const ch: DeckCharacter = {
       group,
       bodyRoot,
@@ -801,6 +876,11 @@ export function createCrewAndLifeboats(
       lifejacket,
       role,
       gait,
+      personality: role === 'officer' || role === 'lookout' ? 'dutiful' : personalityList[variantIdx % 4],
+      panicThreshold: role === 'officer' ? 28 : 16 + (variantIdx % 5) * 4,
+      intent: gait === 'idle' ? 'rail_watch' : 'stroll',
+      decisionTimer: 1.5 + (variantIdx % 4) * 0.8,
+      gazeYaw: 0,
       route,
       musterTarget,
       waypointIdx: route.length > 1 ? 1 : 0,
@@ -818,8 +898,8 @@ export function createCrewAndLifeboats(
     return ch;
   };
 
-  // 1-2: Wheelhouse Watch Officers
-  spawnCharacter(
+  // 1-2: Wheelhouse Watch Officers (Step up to Helm & Telegraph when Autopilot is engaged)
+  const qmOfficer = spawnCharacter(
     'officer',
     [
       { x: 1.55, y: 13.06, z: -0.35, pauseSec: 2.2 },
@@ -831,7 +911,9 @@ export function createCrewAndLifeboats(
     null,
     0.2,
   );
-  spawnCharacter(
+  qmOfficer.helmStation = { x: -0.4, y: 13.06, z: 0.62, yaw: -0.22, role: 'helmsman' };
+
+  const bridgeWatchOfficer = spawnCharacter(
     'officer',
     [
       { x: -1.45, y: 13.06, z: 0.1, pauseSec: 2.4 },
@@ -842,8 +924,10 @@ export function createCrewAndLifeboats(
     null,
     -0.2,
   );
+  bridgeWatchOfficer.helmStation = { x: 0.86, y: 13.06, z: 0.16, yaw: 0.08, role: 'watch_officer' };
+
   // 3-4: Port & Starboard Bridge Wing Officers
-  spawnCharacter(
+  const stbdWingOfficer = spawnCharacter(
     'officer',
     [
       { x: 7.4, y: 13.06, z: -0.5, pauseSec: 1.4 },
@@ -853,7 +937,9 @@ export function createCrewAndLifeboats(
     2,
     { x: 11.4, y: 12.88, z: 9.0 },
   );
-  spawnCharacter(
+  stbdWingOfficer.bowTarget = { x: 10.6, y: 12.88, z: -7.5, pauseSec: 0 };
+
+  const portWingOfficer = spawnCharacter(
     'officer',
     [
       { x: -7.4, y: 13.06, z: -0.5, pauseSec: 1.6 },
@@ -863,11 +949,13 @@ export function createCrewAndLifeboats(
     3,
     { x: -11.4, y: 12.88, z: 9.0 },
   );
+  portWingOfficer.bowTarget = { x: -10.6, y: 12.88, z: -7.5, pauseSec: 0 };
+
   // 5-6: Crow's Nest Lookouts
   spawnCharacter('lookout', [{ x: -0.3, y: 25.4, z: -22.55 }], 'idle', 0, null, 0.08);
   spawnCharacter('lookout', [{ x: 0.3, y: 25.4, z: -22.45 }], 'idle', 1, null, -0.08);
   // 7-8: Forecastle Anchor Watch Crewmen
-  spawnCharacter(
+  const bowWatchPort = spawnCharacter(
     'officer',
     [
       { x: -2.2, y: 9.2, z: -56.0, pauseSec: 2.0 },
@@ -877,7 +965,9 @@ export function createCrewAndLifeboats(
     4,
     { x: -9.5, y: 12.88, z: 10.0 },
   );
-  spawnCharacter(
+  bowWatchPort.bowTarget = { x: -1.65, y: 10.02, z: -69.2, pauseSec: 0 };
+
+  const bowWatchStbd = spawnCharacter(
     'officer',
     [
       { x: 2.2, y: 9.2, z: -59.0, pauseSec: 2.2 },
@@ -887,6 +977,8 @@ export function createCrewAndLifeboats(
     5,
     { x: 9.5, y: 12.88, z: 10.0 },
   );
+  bowWatchStbd.bowTarget = { x: 1.65, y: 10.02, z: -69.2, pauseSec: 0 };
+
   // 9-10: Aft Docking Bridge Watch Officers (sternContent)
   spawnCharacter(
     'officer',
@@ -909,7 +1001,7 @@ export function createCrewAndLifeboats(
     { x: 9.5, y: 12.88, z: 130.0 },
   );
   // 11-14: Boat Deck Quartermasters overseeing port & starboard Welin Davit Clusters
-  spawnCharacter(
+  const fwdQmStbd = spawnCharacter(
     'officer',
     [
       { x: 11.1, y: 12.88, z: 9.0, pauseSec: 1.8 },
@@ -919,7 +1011,9 @@ export function createCrewAndLifeboats(
     8,
     { x: 11.4, y: 12.88, z: 18.2 },
   );
-  spawnCharacter(
+  fwdQmStbd.bowTarget = { x: 10.2, y: 12.88, z: 3.8, pauseSec: 0 };
+
+  const fwdQmPort = spawnCharacter(
     'officer',
     [
       { x: -11.1, y: 12.88, z: 36.5, pauseSec: 1.8 },
@@ -929,6 +1023,7 @@ export function createCrewAndLifeboats(
     9,
     { x: -11.4, y: 12.88, z: 18.2 },
   );
+  fwdQmPort.bowTarget = { x: -10.2, y: 12.88, z: 3.8, pauseSec: 0 };
   spawnCharacter(
     'officer',
     [
@@ -1283,10 +1378,75 @@ export function createCrewAndLifeboats(
       const dz = s.endZ - s.startZ;
       const initialYaw = s.isWalker && Math.hypot(dx, dz) > 0.2 ? Math.atan2(-dx, -dz) : s.facingYaw ?? 0;
 
+      // Compute forward Bow / Forecastle hold-on destination per actor
+      let bowPanicX = s.startX;
+      let bowPanicY = s.startY;
+      let bowPanicZ = s.startZ;
+      let bowPanicYaw = 0;
+      const isFwdBatch = halfContent === bowContent;
+
+      if (isFwdBatch) {
+        // Pack Forecastle & Bow Railings (z = -72.0..-36.5) for ~62% of forward crowd,
+        // and forward railings of Boat / A-Deck / Well Deck for the rest
+        if (s.startY < 11.5 || i % 3 !== 0) {
+          const zBow = THREE.MathUtils.lerp(-71.4, -37.2, Math.pow(rand(), 1.15));
+          const tBow = THREE.MathUtils.clamp((zBow + 74) / 64, 0, 1);
+          const beam = 14.0 * Math.pow(Math.sin((tBow * Math.PI) / 2), 0.78);
+          const flare = 0.26 * (1 - tBow) + 0.05;
+          const railX = Math.max(0.55, beam * (1 + flare) - 0.78);
+          const sheerT = THREE.MathUtils.clamp((-35 - zBow) / 39, 0, 1);
+          const bSide = s.startX >= 0 ? 1 : -1;
+          const grabRail = rand() < 0.68 || zBow < -60;
+          bowPanicX = grabRail
+            ? bSide * THREE.MathUtils.clamp(railX - rand() * 0.65, 0.35, railX)
+            : (rand() * 2 - 1) * Math.max(0.5, railX * 0.74);
+          bowPanicY = 9.16 + sheerT * 1.02;
+          bowPanicZ = zBow;
+          bowPanicYaw = grabRail ? Math.atan2(-bSide * 0.75, 0.66) : Math.atan2(-bowPanicX * 0.12, 1);
+        } else {
+          const bSide = s.startX >= 0 ? 1 : -1;
+          bowPanicX = bSide * THREE.MathUtils.lerp(7.4, 11.4, rand());
+          bowPanicY = 12.88;
+          bowPanicZ = THREE.MathUtils.lerp(3.2, 9.5, rand());
+          bowPanicYaw = Math.atan2(-bSide * 0.35, 0.94);
+        }
+      } else {
+        // Aft batch rushes forward toward the forward rail / front of their aft superstructure section
+        const bSide = s.startX >= 0 ? 1 : -1;
+        if (s.startY > 11.0) {
+          bowPanicX = bSide * THREE.MathUtils.lerp(7.2, 11.4, rand());
+          bowPanicY = 12.88;
+          bowPanicZ = THREE.MathUtils.lerp(91.5, 101.0, rand());
+        } else if (s.startY > 9.0) {
+          bowPanicX = bSide * THREE.MathUtils.lerp(11.6, 12.8, rand());
+          bowPanicY = 9.86;
+          bowPanicZ = THREE.MathUtils.lerp(91.5, 102.0, rand());
+        } else {
+          bowPanicX = bSide * THREE.MathUtils.lerp(3.8, 9.2, rand());
+          bowPanicY = s.startY;
+          bowPanicZ = s.startZ < 170 ? THREE.MathUtils.lerp(149.2, 154.0, rand()) : THREE.MathUtils.lerp(171.2, 175.0, rand());
+        }
+        bowPanicYaw = Math.atan2(-bSide * 0.3, 0.95);
+      }
+
+      const personalityPool: CharacterPersonality[] =
+        s.kind === 'crew' ? ['dutiful', 'calm'] : ['curious', 'social', 'calm'];
+      const personality = personalityPool[Math.floor(rand() * personalityPool.length)];
+      const panicThreshold =
+        s.kind === 'crew'
+          ? 24 + Math.floor(rand() * 18) // crew stay steady up to 24-42% flooding
+          : 11 + Math.floor(rand() * 24); // individual passenger awareness 11-35%
+
       actors.push({
         kind: s.kind,
         allIdx: i,
         roleIdx,
+        personality,
+        panicThreshold,
+        intent: s.isWalker ? 'stroll' : Math.abs(s.startX) > 8.4 ? 'rail_watch' : 'converse',
+        decisionTimer: 1.0 + rand() * 3.8,
+        gazeYaw: 0,
+        peerYaw: initialYaw,
         startX: s.startX,
         startY: s.startY,
         startZ: s.startZ,
@@ -1296,6 +1456,10 @@ export function createCrewAndLifeboats(
         musterX: s.musterX,
         musterY: s.musterY,
         musterZ: s.musterZ,
+        bowPanicX,
+        bowPanicY,
+        bowPanicZ,
+        bowPanicYaw,
         posX: s.startX,
         posY: s.startY,
         posZ: s.startZ,
@@ -1437,6 +1601,8 @@ export function createCrewAndLifeboats(
     showVest: boolean,
     time: number,
     checkSubmerged: boolean,
+    shipRoll: number,
+    waving: boolean,
   ) => {
     if (checkSubmerged) {
       _tmpWorldPos.set(a.posX, a.posY, a.posZ).applyMatrix4(batch.halfContent.matrixWorld);
@@ -1469,13 +1635,38 @@ export function createCrewAndLifeboats(
       ? Math.abs(Math.sin(c)) * (isRunning ? 0.07 : 0.025) - (isRunning ? 0.035 : 0)
       : Math.sin(time * 1.6 + a.phase) * 0.006;
 
-    const torsoPitch = moving ? (isRunning ? -0.22 : -0.05) : 0;
+    const isConversing = !moving && a.intent === 'converse';
+    const isBracing = !moving && a.intent === 'brace';
+    const isHoldingBow = !moving && a.intent === 'hold_bow';
+    const isScreamingRun = moving && isRunning && a.intent === 'hold_bow';
+
+    const torsoPitch = moving
+      ? isRunning
+        ? -0.24
+        : -0.05
+      : isHoldingBow
+        ? -0.15 + Math.sin(time * 9.0 + a.phase) * 0.025
+        : isBracing
+          ? -0.04
+          : 0;
+    const torsoRoll = isBracing || isHoldingBow ? -shipRoll * 0.72 : -shipRoll * 0.25;
     const torsoYaw = moving
       ? Math.sin(c) * (isRunning ? 0.12 : 0.05)
-      : Math.sin(time * 0.65 + a.phase) * 0.05;
+      : isHoldingBow
+        ? Math.sin(time * 6.5 + a.phase) * 0.07
+        : isConversing
+          ? Math.sin(time * 1.2 + a.phase) * 0.12
+          : Math.sin(time * 0.65 + a.phase) * 0.05;
+    const headPitch = isHoldingBow
+      ? -0.22 + Math.sin(time * 11.0 + a.phase) * 0.08
+      : isScreamingRun
+        ? -0.16 + Math.sin(time * 10.0 + a.phase) * 0.07
+        : 0;
     const headYaw = moving
-      ? Math.sin(time * (isRunning ? 4.2 : 0.9) + a.phase) * 0.14
-      : Math.sin(time * 0.95 + a.phase * 1.3) * 0.32;
+      ? THREE.MathUtils.clamp(a.gazeYaw * 0.4 + Math.sin(time * (isRunning ? 5.2 : 0.9) + a.phase) * 0.18, -0.75, 0.75)
+      : isHoldingBow
+        ? Math.sin(time * 7.5 + a.phase * 1.7) * 0.35
+        : THREE.MathUtils.clamp(a.gazeYaw + Math.sin(time * 0.95 + a.phase * 1.3) * 0.24, -0.85, 0.85);
 
     const swingL = moving ? Math.sin(c) * strideAmp : 0;
     const swingR = -swingL;
@@ -1489,14 +1680,14 @@ export function createCrewAndLifeboats(
       _vScale.set(a.scaleW, a.scaleH, a.scaleW),
     );
 
-    // Legs
-    _euler.set(swingL, 0, 0);
+    // Legs (wide braced stance when holding onto the bow railing!)
+    _euler.set(swingL, 0, isBracing || isHoldingBow ? -0.11 : 0);
     _qRot.setFromEuler(_euler);
     _localMat.compose(_vPos.set(-0.095, -0.04, 0), _qRot, _vScale.set(1, 1, 1));
     _partMat.multiplyMatrices(_pelvisMat, _localMat);
     batch.leftLegInst.setMatrixAt(a.allIdx, _partMat);
 
-    _euler.set(swingR, 0, 0);
+    _euler.set(swingR, 0, isBracing || isHoldingBow ? 0.11 : 0);
     _qRot.setFromEuler(_euler);
     _localMat.compose(_vPos.set(0.095, -0.04, 0), _qRot, _vScale.set(1, 1, 1));
     _partMat.multiplyMatrices(_pelvisMat, _localMat);
@@ -1511,7 +1702,7 @@ export function createCrewAndLifeboats(
     }
 
     // 2. Torso matrix
-    _euler.set(torsoPitch, torsoYaw, 0);
+    _euler.set(torsoPitch, torsoYaw, torsoRoll);
     _qRot.setFromEuler(_euler);
     _localMat.compose(
       _vPos.set(0, 0, 0),
@@ -1527,22 +1718,46 @@ export function createCrewAndLifeboats(
       batch.vestInst.setMatrixAt(a.allIdx, _zeroMat);
     }
 
-    // Arms
+    // Arms: gripping bow railings tightly in panic, waving, conversing, bracing, or running
     const armX = a.kind === 'lady' ? 0.17 : 0.205;
-    _euler.set(moving ? swingR * armAmp : Math.sin(time * 0.9 + a.phase) * 0.04, 0, 0.09);
+    const leftPitch = isHoldingBow
+      ? 1.34 + Math.sin(time * 8.5 + a.phase) * 0.06
+      : isScreamingRun
+        ? 0.9 + swingR * 0.55
+        : moving
+          ? swingR * armAmp
+          : isConversing
+            ? 0.42 + Math.sin(time * 2.8 + a.phase) * 0.24
+            : isBracing
+              ? 0.22
+              : Math.sin(time * 0.9 + a.phase) * 0.04;
+    _euler.set(leftPitch, 0, isHoldingBow ? -0.14 : isBracing ? 0.28 : 0.09);
     _qRot.setFromEuler(_euler);
     _localMat.compose(_vPos.set(-armX, 0.41, 0), _qRot, _vScale.set(1, 1, 1));
     _partMat.multiplyMatrices(_torsoMat, _localMat);
     batch.leftArmInst.setMatrixAt(a.allIdx, _partMat);
 
-    _euler.set(moving ? swingL * armAmp : -Math.sin(time * 0.9 + a.phase) * 0.04, 0, -0.09);
+    const rightPitch = isHoldingBow
+      ? 1.34 + Math.cos(time * 8.5 + a.phase) * 0.06
+      : isScreamingRun
+        ? 0.9 + swingL * 0.55
+        : moving
+          ? swingL * armAmp
+          : waving
+            ? 2.25 + Math.sin(time * 5.2 + a.phase) * 0.42
+            : isConversing
+              ? 0.36 + Math.cos(time * 2.4 + a.phase) * 0.2
+              : isBracing
+                ? 0.22
+                : -Math.sin(time * 0.9 + a.phase) * 0.04;
+    _euler.set(rightPitch, 0, isHoldingBow ? 0.14 : waving ? -0.35 : isBracing ? -0.28 : -0.09);
     _qRot.setFromEuler(_euler);
     _localMat.compose(_vPos.set(armX, 0.41, 0), _qRot, _vScale.set(1, 1, 1));
     _partMat.multiplyMatrices(_torsoMat, _localMat);
     batch.rightArmInst.setMatrixAt(a.allIdx, _partMat);
 
     // 3. Head matrix
-    _euler.set(0, headYaw, 0);
+    _euler.set(headPitch, headYaw, 0);
     _qRot.setFromEuler(_euler);
     _localMat.compose(_vPos.set(0, 0.57, 0), _qRot, _vScale.set(1, 1, 1));
     _headMat.multiplyMatrices(_torsoMat, _localMat);
@@ -1563,24 +1778,163 @@ export function createCrewAndLifeboats(
     batch: HalfCrowdBatch,
     dt: number,
     time: number,
-    showVest: boolean,
-    emergencyRun: boolean,
+    floodingPct: number,
+    forceEmergencyRun: boolean,
     checkSubmerged: boolean,
+    awareness?: CruiseAwarenessContext,
   ) => {
     const actors = batch.actors;
-    for (let i = 0; i < actors.length; i++) {
-      const a = actors[i];
-      let moving = false;
+    const n = actors.length;
+    const shipRoll = awareness?.shipRoll ?? 0;
+    const harborNear = awareness?.harborNear ?? false;
+    const hazardSide = awareness?.hazardSide ?? 0;
+    const bowPanicActive = Boolean(awareness?.bowPanicActive) && !forceEmergencyRun;
+    const hasPlayer = awareness?.playerLocalX !== undefined && awareness?.playerLocalZ !== undefined;
+    const playerX = awareness?.playerLocalX ?? 0;
+    const playerY = awareness?.playerLocalY ?? 0;
+    const playerZ = awareness?.playerLocalZ ?? 0;
 
-      if (emergencyRun) {
+    // 1. Populate Zero-GC Spatial Hash Grid for Peer Awareness & Avoidance
+    _gridHead.fill(-1);
+    for (let i = 0; i < n; i++) {
+      const a = actors[i];
+      const col = Math.max(0, Math.min(GRID_COLS - 1, Math.floor((a.posX + 18) / 3)));
+      const row = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor((a.posZ + 78) / 3)));
+      const cell = row * GRID_COLS + col;
+      _gridNext[i] = _gridHead[cell];
+      _gridHead[cell] = i;
+    }
+
+    for (let i = 0; i < n; i++) {
+      const a = actors[i];
+      const individualPanic = forceEmergencyRun || (!bowPanicActive && floodingPct >= a.panicThreshold);
+      const showVest = forceEmergencyRun || floodingPct >= Math.max(8, a.panicThreshold - 4);
+      let moving = false;
+      let waving = false;
+
+      // Nearest peer scan in 3x3 spatial neighborhood
+      const col0 = Math.max(0, Math.min(GRID_COLS - 1, Math.floor((a.posX + 18) / 3)));
+      const row0 = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor((a.posZ + 78) / 3)));
+      let avoidX = 0;
+      let avoidZ = 0;
+      let nearestPeerDist = 99;
+      let nearestPeerX = 0;
+      let nearestPeerZ = 0;
+
+      for (let rr = Math.max(0, row0 - 1); rr <= Math.min(GRID_ROWS - 1, row0 + 1); rr++) {
+        for (let cc = Math.max(0, col0 - 1); cc <= Math.min(GRID_COLS - 1, col0 + 1); cc++) {
+          let j = _gridHead[rr * GRID_COLS + cc];
+          while (j !== -1) {
+            if (j !== i) {
+              const p = actors[j];
+              if (Math.abs(p.posY - a.posY) < 1.2) {
+                const dx = a.posX - p.posX;
+                const dz = a.posZ - p.posZ;
+                const d2 = dx * dx + dz * dz;
+                if (d2 < 1.5 && d2 > 0.0004) {
+                  const d = Math.sqrt(d2);
+                  const push = (1.22 - d) * 1.4;
+                  avoidX += (dx / d) * push;
+                  avoidZ += (dz / d) * push;
+                }
+                if (d2 < nearestPeerDist * nearestPeerDist && d2 > 0.25) {
+                  nearestPeerDist = Math.sqrt(d2);
+                  nearestPeerX = p.posX;
+                  nearestPeerZ = p.posZ;
+                }
+              }
+            }
+            j = _gridNext[j];
+          }
+        }
+      }
+
+      // Independent thought & intent cycle
+      a.decisionTimer -= dt;
+      if (bowPanicActive) {
+        a.intent = 'hold_bow';
+      } else if (individualPanic) {
+        a.intent = 'muster_run';
+      } else if (Math.abs(shipRoll) > 0.048 && !a.isWalker) {
+        a.intent = 'brace';
+      } else if (a.decisionTimer <= 0) {
+        a.decisionTimer = 2.2 + ((i * 17) % 10) * 0.35;
+        if (!a.isWalker) {
+          if (harborNear && Math.abs(a.posX) > 8.4) {
+            a.intent = 'rail_watch';
+          } else if (nearestPeerDist < 2.5 && a.personality !== 'dutiful') {
+            a.intent = 'converse';
+            a.peerYaw = Math.atan2(-(nearestPeerX - a.posX), -(nearestPeerZ - a.posZ));
+          } else {
+            a.intent = a.personality === 'curious' ? 'rail_watch' : 'stroll';
+          }
+        } else if (a.intent === 'converse') {
+          a.intent = 'stroll';
+        } else if (a.personality === 'social' && nearestPeerDist < 1.9 && (i + Math.floor(time)) % 4 === 0) {
+          a.intent = 'converse';
+          a.pauseTimer = 2.2;
+          a.peerYaw = Math.atan2(-(nearestPeerX - a.posX), -(nearestPeerZ - a.posZ));
+        }
+      }
+
+      // Gaze awareness: track player if close on deck, else hazard direction, else harbor/peer
+      let targetGaze = 0;
+      if (hasPlayer && Math.abs(a.posY - (playerY - 1.55)) < 2.1) {
+        const pdx = playerX - a.posX;
+        const pdz = playerZ - a.posZ;
+        if (pdx * pdx + pdz * pdz < 46) {
+          const worldYaw = Math.atan2(-pdx, -pdz);
+          let rel = worldYaw - a.rotY;
+          while (rel > Math.PI) rel -= Math.PI * 2;
+          while (rel < -Math.PI) rel += Math.PI * 2;
+          targetGaze = THREE.MathUtils.clamp(rel, -0.85, 0.85);
+        }
+      } else if (hazardSide !== 0 && a.personality === 'curious') {
+        targetGaze = hazardSide * 0.55;
+      }
+      a.gazeYaw = THREE.MathUtils.damp(a.gazeYaw, targetGaze, 4.5, Math.max(dt, 0.016));
+
+      if (bowPanicActive) {
+        const dx = a.bowPanicX - a.posX;
+        const dz = a.bowPanicZ - a.posZ;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 0.42) {
+          moving = true;
+          const panicRun = a.runSpeed * 1.24;
+          const step = Math.min(dist, panicRun * dt);
+          let dirX = dx / dist + avoidX * 0.35;
+          let dirZ = dz / dist + avoidZ * 0.35;
+          const dLen = Math.hypot(dirX, dirZ) || 1;
+          dirX /= dLen;
+          dirZ /= dLen;
+          a.posX += dirX * step;
+          a.posZ += dirZ * step;
+          a.posY = THREE.MathUtils.damp(a.posY, a.bowPanicY, 6, dt);
+          const desiredYaw = Math.atan2(-dirX, -dirZ);
+          let dy = desiredYaw - a.rotY;
+          while (dy > Math.PI) dy -= Math.PI * 2;
+          while (dy < -Math.PI) dy += Math.PI * 2;
+          a.rotY += dy * Math.min(1, dt * 8);
+          a.strideCycle += panicRun * dt * 2.8;
+        } else {
+          a.posY = THREE.MathUtils.damp(a.posY, a.bowPanicY, 6, dt);
+          let dy = a.bowPanicYaw - a.rotY;
+          while (dy > Math.PI) dy -= Math.PI * 2;
+          while (dy < -Math.PI) dy += Math.PI * 2;
+          a.rotY += dy * Math.min(1, dt * 6);
+        }
+      } else if (individualPanic) {
         const dx = a.musterX - a.posX;
         const dz = a.musterZ - a.posZ;
         const dist = Math.hypot(dx, dz);
         if (dist > 0.35) {
           moving = true;
           const step = Math.min(dist, a.runSpeed * dt);
-          const dirX = dx / dist;
-          const dirZ = dz / dist;
+          let dirX = dx / dist + avoidX * 0.45;
+          let dirZ = dz / dist + avoidZ * 0.45;
+          const dLen = Math.hypot(dirX, dirZ) || 1;
+          dirX /= dLen;
+          dirZ /= dLen;
           a.posX += dirX * step;
           a.posZ += dirZ * step;
           a.posY = THREE.MathUtils.damp(a.posY, a.musterY, 5, dt);
@@ -1591,6 +1945,12 @@ export function createCrewAndLifeboats(
           a.rotY += dy * Math.min(1, dt * 6);
           a.strideCycle += a.runSpeed * dt * 2.65;
         }
+      } else if (a.intent === 'converse' && a.pauseTimer > 0) {
+        a.pauseTimer -= dt;
+        let dy = a.peerYaw - a.rotY;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        a.rotY += dy * Math.min(1, dt * 4);
       } else if (a.isWalker) {
         const tx = a.goingForward ? a.endX : a.startX;
         const ty = a.goingForward ? a.endY : a.startY;
@@ -1602,11 +1962,17 @@ export function createCrewAndLifeboats(
           if (a.pauseTimer <= 0) a.pauseTimer = 1.4 + (i % 3) * 0.6;
           a.pauseTimer -= dt;
           if (a.pauseTimer <= 0) a.goingForward = !a.goingForward;
+          if (harborNear && Math.abs(a.posX) > 8.8 && (i % 3 === 0)) {
+            waving = true;
+          }
         } else {
           moving = true;
           const step = Math.min(dist, a.walkSpeed * dt);
-          const dirX = dx / dist;
-          const dirZ = dz / dist;
+          let dirX = dx / dist + avoidX * 0.55;
+          let dirZ = dz / dist + avoidZ * 0.55;
+          const dLen = Math.hypot(dirX, dirZ) || 1;
+          dirX /= dLen;
+          dirZ /= dLen;
           a.posX += dirX * step;
           a.posZ += dirZ * step;
           a.posY = THREE.MathUtils.damp(a.posY, ty, 5, dt);
@@ -1617,9 +1983,26 @@ export function createCrewAndLifeboats(
           a.rotY += dy * Math.min(1, dt * 6);
           a.strideCycle += a.walkSpeed * dt * 3.1;
         }
+      } else if (a.intent === 'rail_watch' && harborNear) {
+        const railYaw = a.posX >= 0 ? -Math.PI / 2 : Math.PI / 2;
+        let dy = railYaw - a.rotY;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        a.rotY += dy * Math.min(1, dt * 3);
+        waving = a.posX > 8.0 || (i % 4 === 0);
       }
 
-      writeActorMatrices(batch, a, moving, emergencyRun && moving, showVest, time, checkSubmerged);
+      writeActorMatrices(
+        batch,
+        a,
+        moving,
+        (individualPanic || bowPanicActive) && moving,
+        showVest,
+        time,
+        checkSubmerged,
+        shipRoll,
+        waving,
+      );
     }
 
     batch.torsoInst.instanceMatrix.needsUpdate = true;
@@ -1638,7 +2021,7 @@ export function createCrewAndLifeboats(
 
   // Populate initial frame-0 poses for all 986 instanced characters
   for (const batch of batches) {
-    stepCrowdBatch(batch, 0, 0, false, false, false);
+    stepCrowdBatch(batch, 0, 0, 0, false, false);
   }
 
   // =========================================================================
@@ -1810,35 +2193,95 @@ export function createCrewAndLifeboats(
         rescued: false,
         splashX: side * 17.5,
         splashZ: bz,
+        boatX: side * 17.5,
+        boatZ: bz,
+        boatYaw: side * 0.25,
       });
     }
   }
 
   // =========================================================================
-  // ARTICULATED WALKING / RUNNING KINEMATICS FOR HERO CHARACTERS
+  // ARTICULATED WALKING / RUNNING KINEMATICS & CONSCIOUS HERO CHARACTERS
   // =========================================================================
-  const animateLimbGait = (ch: DeckCharacter, speedFactor: number, isRunning: boolean, time: number) => {
+  const animateLimbGait = (
+    ch: DeckCharacter,
+    speedFactor: number,
+    isRunning: boolean,
+    time: number,
+    awareness?: CruiseAwarenessContext,
+    holdingBow = false,
+  ) => {
+    const hazardSide = awareness?.hazardSide ?? 0;
+    const shipRoll = awareness?.shipRoll ?? 0;
+    const bridgeOrderActive = awareness?.bridgeOrderActive ?? false;
+    const autopilotActive = Boolean(awareness?.autopilotActive);
+    const rudderNorm = THREE.MathUtils.clamp((awareness?.rudderDeg ?? 0) / 35, -1, 1);
+
     if (speedFactor < 0.05) {
       ch.bodyRoot.position.y = 0.85 + Math.sin(time * 1.7 + ch.phase) * 0.008;
-      ch.torsoGroup.rotation.x = THREE.MathUtils.damp(ch.torsoGroup.rotation.x, 0, 8, 0.03);
-      ch.torsoGroup.rotation.y = Math.sin(time * 0.6 + ch.phase) * 0.04;
+      ch.torsoGroup.rotation.x = THREE.MathUtils.damp(
+        ch.torsoGroup.rotation.x,
+        holdingBow ? -0.14 : autopilotActive && ch.helmStation?.role === 'helmsman' ? -0.06 : 0,
+        8,
+        0.03,
+      );
+      ch.torsoGroup.rotation.z = THREE.MathUtils.damp(ch.torsoGroup.rotation.z, -shipRoll * 0.55, 6, 0.04);
+      ch.torsoGroup.rotation.y =
+        autopilotActive && ch.helmStation?.role === 'helmsman'
+          ? rudderNorm * 0.1
+          : Math.sin(time * 0.6 + ch.phase) * 0.04;
       ch.leftLegHip.rotation.x = THREE.MathUtils.damp(ch.leftLegHip.rotation.x, 0, 8, 0.03);
       ch.rightLegHip.rotation.x = THREE.MathUtils.damp(ch.rightLegHip.rotation.x, 0, 8, 0.03);
       ch.leftKnee.rotation.x = THREE.MathUtils.damp(ch.leftKnee.rotation.x, 0.04, 8, 0.03);
       ch.rightKnee.rotation.x = THREE.MathUtils.damp(ch.rightKnee.rotation.x, 0.04, 8, 0.03);
 
-      if (ch.role === 'lookout') {
+      if (autopilotActive && ch.helmStation?.role === 'helmsman') {
+        // Quartermaster grips & turns the mahogany helm wheel in sync with autopilot rudder commands
+        ch.leftArmHip.rotation.set(1.18 - rudderNorm * 0.34, 0.08, -0.18);
+        ch.rightArmHip.rotation.set(1.18 + rudderNorm * 0.34, -0.08, 0.18);
+        ch.leftElbow.rotation.x = 0.52;
+        ch.rightElbow.rotation.x = 0.52;
+        ch.headGroup.rotation.y = THREE.MathUtils.damp(
+          ch.headGroup.rotation.y,
+          hazardSide * 0.35 + rudderNorm * 0.18,
+          5,
+          0.05,
+        );
+      } else if (holdingBow) {
+        // Grip bow railing tightly with both hands while leaning and shouting in alarm
+        ch.leftArmHip.rotation.set(1.32 + Math.sin(time * 8 + ch.phase) * 0.05, 0, -0.14);
+        ch.rightArmHip.rotation.set(1.32 + Math.cos(time * 8 + ch.phase) * 0.05, 0, 0.14);
+        ch.leftElbow.rotation.x = 0.42;
+        ch.rightElbow.rotation.x = 0.42;
+        ch.headGroup.rotation.y = THREE.MathUtils.damp(
+          ch.headGroup.rotation.y,
+          Math.sin(time * 6.5 + ch.phase) * 0.38,
+          6,
+          0.05,
+        );
+      } else if (ch.role === 'lookout') {
         ch.leftArmHip.rotation.set(1.15, 0, 0.25);
         ch.rightArmHip.rotation.set(1.15, 0, -0.25);
         ch.leftElbow.rotation.x = 1.4;
         ch.rightElbow.rotation.x = 1.4;
+        // Lookouts actively turn toward any hazard off port/starboard bow
+        const scanTarget = hazardSide !== 0 ? hazardSide * 0.62 : Math.sin(time * 0.8 + ch.phase) * 0.45;
+        ch.headGroup.rotation.y = THREE.MathUtils.damp(ch.headGroup.rotation.y, scanTarget, 5, 0.05);
       } else {
+        // Watch officers signal toward helm/telegraph when an order rings, or keep bridge/harbor watch
+        const saluteGesture = bridgeOrderActive || (autopilotActive && ch.helmStation?.role === 'watch_officer') ? 0.58 : 0;
         ch.leftArmHip.rotation.set(Math.sin(time * 0.8 + ch.phase) * 0.04, 0, 0.08);
-        ch.rightArmHip.rotation.set(-Math.sin(time * 0.8 + ch.phase) * 0.04, 0, -0.08);
+        ch.rightArmHip.rotation.set(-Math.sin(time * 0.8 + ch.phase) * 0.04 + saluteGesture, 0, -0.08);
         ch.leftElbow.rotation.x = 0.14;
-        ch.rightElbow.rotation.x = 0.14;
+        ch.rightElbow.rotation.x = saluteGesture > 0 ? 0.95 : 0.14;
+        const lookBias = bridgeOrderActive ? -0.45 : hazardSide * 0.4;
+        ch.headGroup.rotation.y = THREE.MathUtils.damp(
+          ch.headGroup.rotation.y,
+          lookBias + Math.sin(time * 0.95 + ch.phase * 1.4) * 0.25,
+          4,
+          0.05,
+        );
       }
-      ch.headGroup.rotation.y = Math.sin(time * 0.95 + ch.phase * 1.4) * 0.28;
       return;
     }
 
@@ -1849,6 +2292,7 @@ export function createCrewAndLifeboats(
 
     ch.bodyRoot.position.y = 0.85 + Math.abs(Math.sin(c)) * bobAmp - (isRunning ? 0.04 : 0);
     ch.torsoGroup.rotation.x = isRunning ? -0.24 : -0.05;
+    ch.torsoGroup.rotation.z = THREE.MathUtils.damp(ch.torsoGroup.rotation.z, -shipRoll * 0.35, 6, 0.04);
     ch.torsoGroup.rotation.y = Math.sin(c) * (isRunning ? 0.14 : 0.06);
 
     const swingL = Math.sin(c) * strideAmp;
@@ -1876,9 +2320,77 @@ export function createCrewAndLifeboats(
     dt: number,
     time: number,
     emergencyRun: boolean,
+    awareness?: CruiseAwarenessContext,
   ) => {
+    const autopilotActive = Boolean(awareness?.autopilotActive) && !emergencyRun;
+    const bowPanicActive = Boolean(awareness?.bowPanicActive) && !emergencyRun;
+
+    // 1. Wheelhouse Crew Take the Helm when Autopilot is Enabled
+    if (autopilotActive && ch.helmStation) {
+      const dx = ch.helmStation.x - ch.posX;
+      const dz = ch.helmStation.z - ch.posZ;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 0.12) {
+        const step = Math.min(dist, ch.walkSpeed * 1.35 * dt);
+        const dirX = dx / dist;
+        const dirZ = dz / dist;
+        ch.posX += dirX * step;
+        ch.posZ += dirZ * step;
+        ch.posY = THREE.MathUtils.damp(ch.posY, ch.helmStation.y, 6, dt);
+        ch.group.position.set(ch.posX, ch.posY, ch.posZ);
+        const desiredYaw = Math.atan2(-dirX, -dirZ);
+        let dy = desiredYaw - ch.group.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        ch.group.rotation.y += dy * Math.min(1, dt * 8);
+        ch.strideCycle += ch.walkSpeed * 1.35 * dt * 3.2;
+        animateLimbGait(ch, 1, false, time, awareness);
+      } else {
+        ch.posX = ch.helmStation.x;
+        ch.posZ = ch.helmStation.z;
+        ch.group.position.set(ch.posX, ch.helmStation.y, ch.posZ);
+        let dy = ch.helmStation.yaw - ch.group.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        ch.group.rotation.y += dy * Math.min(1, dt * 7);
+        animateLimbGait(ch, 0, false, time, awareness);
+      }
+      return;
+    }
+
+    // 2. Non-wheelhouse forward deck officers rush to bow & hold on during Iceberg Strike Bow Panic
+    if (bowPanicActive && ch.bowTarget) {
+      const dx = ch.bowTarget.x - ch.posX;
+      const dz = ch.bowTarget.z - ch.posZ;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 0.35) {
+        const step = Math.min(dist, ch.runSpeed * 1.15 * dt);
+        const dirX = dx / dist;
+        const dirZ = dz / dist;
+        ch.posX += dirX * step;
+        ch.posZ += dirZ * step;
+        ch.posY = THREE.MathUtils.damp(ch.posY, ch.bowTarget.y, 6, dt);
+        ch.group.position.set(ch.posX, ch.posY, ch.posZ);
+        const desiredYaw = Math.atan2(-dirX, -dirZ);
+        let dy = desiredYaw - ch.group.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        ch.group.rotation.y += dy * Math.min(1, dt * 7);
+        ch.strideCycle += ch.runSpeed * 1.15 * dt * 2.65;
+        animateLimbGait(ch, 1, true, time, awareness, true);
+      } else {
+        const railYaw = Math.atan2(-Math.sign(ch.posX || 1) * 0.45, 0.89);
+        let dy = railYaw - ch.group.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        ch.group.rotation.y += dy * Math.min(1, dt * 6);
+        animateLimbGait(ch, 0, false, time, awareness, true);
+      }
+      return;
+    }
+
     if (ch.route.length <= 1 && !(emergencyRun && ch.musterTarget)) {
-      animateLimbGait(ch, 0, false, time);
+      animateLimbGait(ch, 0, false, time, awareness);
       return;
     }
 
@@ -1898,14 +2410,14 @@ export function createCrewAndLifeboats(
 
     if (dist < 0.35) {
       if (emergencyRun && ch.musterTarget) {
-        animateLimbGait(ch, 0, false, time);
+        animateLimbGait(ch, 0, false, time, awareness);
         return;
       }
       if (ch.pauseTimer <= 0) {
         ch.pauseTimer = target.pauseSec ?? 1.5;
       }
       ch.pauseTimer -= dt;
-      animateLimbGait(ch, 0, false, time);
+      animateLimbGait(ch, 0, false, time, awareness);
       if (ch.pauseTimer <= 0) {
         ch.waypointIdx = (ch.waypointIdx + 1) % ch.route.length;
       }
@@ -1929,45 +2441,21 @@ export function createCrewAndLifeboats(
     ch.group.rotation.y += deltaYaw * Math.min(1, dt * 7);
 
     ch.strideCycle += moveSpeed * dt * (isRunning ? 2.65 : 3.2);
-    animateLimbGait(ch, 1, isRunning, time);
+    animateLimbGait(ch, 1, isRunning, time, awareness);
   };
 
-  const updateCruising = (time: number, dt: number, floodingPct: number) => {
-    const showVests = floodingPct > 28;
-    const emergencyRun = floodingPct > 38;
-    for (const ch of characters) {
-      ch.lifejacket.visible = showVests;
-      stepCharacterMovement(ch, dt, time, emergencyRun);
-    }
-    for (const batch of batches) {
-      stepCrowdBatch(batch, dt, time, showVests, emergencyRun, false);
-    }
-  };
-
-  const updateSinking = (
+  const animateLifeboatsProgress = (
     time: number,
     dt: number,
-    sinkProgress: number,
+    progress: number,
     shipRoot: THREE.Group,
   ): number => {
     shipRoot.updateMatrixWorld(true);
-
-    // 1. All 1,000 characters put on cork lifejackets & sprint to muster stations
-    for (const ch of characters) {
-      ch.lifejacket.visible = true;
-      stepCharacterMovement(ch, dt, time, true);
-      ch.group.getWorldPosition(_tmpWorldPos);
-      ch.group.visible = _tmpWorldPos.y > -0.95;
-    }
-    for (const batch of batches) {
-      stepCrowdBatch(batch, dt, time, true, true, true);
-    }
-
-    // 2. Animate 16 Sculpted Lifeboats swinging out, lowering on ropes & rowing clear
     let launchedCount = 0;
 
-    for (const lb of lifeboats) {
-      const localT = THREE.MathUtils.clamp((sinkProgress - lb.lowerStart) / lb.lowerDuration, 0, 1);
+    for (let li = 0; li < lifeboats.length; li++) {
+      const lb = lifeboats[li];
+      const localT = THREE.MathUtils.clamp((progress - lb.lowerStart) / lb.lowerDuration, 0, 1);
       if (localT <= 0.001) continue;
 
       lb.occupantsGroup.visible = true;
@@ -2001,22 +2489,55 @@ export function createCrewAndLifeboats(
           shipRoot.worldToLocal(_tmpWorldPos);
           lb.splashX = lb.side * Math.max(17.5, Math.abs(_tmpWorldPos.x));
           lb.splashZ = _tmpWorldPos.z;
+          lb.boatX = lb.splashX;
+          lb.boatZ = lb.splashZ;
+          lb.boatYaw = lb.side * 0.35;
           lb.homeParent.remove(lb.boatGroup);
           shipRoot.add(lb.boatGroup);
           lb.ropeFore.visible = false;
           lb.ropeAft.visible = false;
           lb.oarsGroup.visible = true;
         }
+        // Conscious coxswain navigation: steer clear of Titanic's hull AND separate from neighboring boats
         const rowT = THREE.MathUtils.clamp((localT - 0.78) / 0.22, 0, 1);
-        const extraDrift = Math.max(0, sinkProgress - (lb.lowerStart + lb.lowerDuration * 0.85)) * 46;
-        lb.boatGroup.position.set(
-          lb.splashX + lb.side * (rowT * 6.5 + extraDrift),
-          boatWaterY,
-          lb.splashZ + (lb.index - 3.5) * 1.6 * rowT,
-        );
+        const goalX = lb.splashX + lb.side * (8.5 + rowT * 8.0 + Math.max(0, progress - lb.lowerStart) * 42);
+        const goalZ = lb.splashZ + (lb.index - 3.5) * 2.2;
+        let vx = goalX - lb.boatX;
+        let vz = goalZ - lb.boatZ;
+
+        // Avoid Titanic's hull lateral zone
+        if (Math.abs(lb.boatX) < 18.5 && lb.boatZ > -78 && lb.boatZ < 200) {
+          vx += lb.side * 12.0;
+        }
+        // Avoid bumping neighboring lowered lifeboats
+        for (let oj = 0; oj < lifeboats.length; oj++) {
+          if (oj === li || !lifeboats[oj].detached) continue;
+          const ob = lifeboats[oj];
+          const sx = lb.boatX - ob.boatX;
+          const sz = lb.boatZ - ob.boatZ;
+          const sd = Math.hypot(sx, sz);
+          if (sd < 9.5 && sd > 0.05) {
+            const push = ((9.5 - sd) / 9.5) * 6.5;
+            vx += (sx / sd) * push;
+            vz += (sz / sd) * push;
+          }
+        }
+        const vLen = Math.hypot(vx, vz);
+        if (vLen > 0.2 && dt > 0) {
+          const step = Math.min(vLen, 5.2 * dt);
+          lb.boatX += (vx / vLen) * step;
+          lb.boatZ += (vz / vLen) * step;
+          const targetYaw = Math.atan2(-vx, -vz);
+          let dy = targetYaw - lb.boatYaw;
+          while (dy > Math.PI) dy -= Math.PI * 2;
+          while (dy < -Math.PI) dy += Math.PI * 2;
+          lb.boatYaw += dy * Math.min(1, dt * 3.0);
+        }
+
+        lb.boatGroup.position.set(lb.boatX, boatWaterY, lb.boatZ);
         lb.boatGroup.rotation.set(
           Math.sin(time * 1.5 + lb.index) * 0.04,
-          lb.side * (0.25 + rowT * 0.45),
+          lb.boatYaw,
           Math.cos(time * 1.2 + lb.index) * 0.05,
         );
         const rowSweep = Math.sin(time * 2.8 + lb.index);
@@ -2053,6 +2574,52 @@ export function createCrewAndLifeboats(
     return launchedCount;
   };
 
+  const updateCruising = (
+    time: number,
+    dt: number,
+    floodingPct: number,
+    shipRoot?: THREE.Group,
+    awareness?: CruiseAwarenessContext,
+  ) => {
+    const bowPanic = Boolean(awareness?.bowPanicActive);
+    for (const ch of characters) {
+      const chPanic = !bowPanic && floodingPct >= ch.panicThreshold;
+      ch.lifejacket.visible = floodingPct >= Math.max(12, ch.panicThreshold - 4);
+      stepCharacterMovement(ch, dt, time, chPanic, awareness);
+    }
+    for (const batch of batches) {
+      stepCrowdBatch(batch, dt, time, floodingPct, false, false, awareness);
+    }
+    // Lower forward boats early if hull is actively flooding before sinking plunge
+    if (shipRoot && floodingPct >= 14) {
+      const earlyProgress = THREE.MathUtils.clamp(((floodingPct - 14) / 86) * 0.38, 0, 0.38);
+      animateLifeboatsProgress(time, dt, earlyProgress, shipRoot);
+    }
+  };
+
+  const updateSinking = (
+    time: number,
+    dt: number,
+    sinkProgress: number,
+    shipRoot: THREE.Group,
+  ): number => {
+    shipRoot.updateMatrixWorld(true);
+
+    // 1. All 1,000 characters put on cork lifejackets & sprint to muster stations
+    for (const ch of characters) {
+      ch.lifejacket.visible = true;
+      stepCharacterMovement(ch, dt, time, true);
+      ch.group.getWorldPosition(_tmpWorldPos);
+      ch.group.visible = _tmpWorldPos.y > -0.95;
+    }
+    for (const batch of batches) {
+      stepCrowdBatch(batch, dt, time, 100, true, true);
+    }
+
+    // 2. Animate 16 Conscious Lifeboats swinging out, lowering on ropes & steering clear of hull/each other
+    return animateLifeboatsProgress(time, dt, sinkProgress, shipRoot);
+  };
+
   const updateRescue = (
     time: number,
     dt: number,
@@ -2061,12 +2628,21 @@ export function createCrewAndLifeboats(
     carpathiaRoot: THREE.Group,
     boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>,
     shipRoot: THREE.Group,
+    warshipRescue?: WarshipRescueContext,
   ): RescueProgressResult => {
     shipRoot.updateMatrixWorld(true);
     carpathiaRoot.updateMatrixWorld(true);
+    if (warshipRescue) {
+      warshipRescue.root.updateMatrixWorld(true);
+    }
 
-    let boatsRecovered = 0;
-    let fractionalSurvivors = 0;
+    let warshipBoatsRecovered = 0;
+    let carpathiaBoatsRecovered = 0;
+    let warshipFrac = 0;
+    let carpathiaFrac = 0;
+
+    const warshipBoatTotal = warshipRescue ? 8 : 0;
+    const carpathiaBoatTotal = lifeboats.length - warshipBoatTotal;
 
     for (let i = 0; i < lifeboats.length; i++) {
       const lb = lifeboats[i];
@@ -2078,20 +2654,38 @@ export function createCrewAndLifeboats(
         lb.ropeAft.visible = false;
         lb.oarsGroup.visible = true;
         lb.lanternMesh.visible = true;
+        lb.boatX = lb.boatGroup.position.x;
+        lb.boatZ = lb.boatGroup.position.z;
       }
 
-      const waveIdx = Math.floor(i / 4);
-      const slotIdx = i % boardingStationsLocal.length;
-      const st = boardingStationsLocal[slotIdx];
+      const assignedToWarship = Boolean(warshipRescue) && i % 2 === 0;
       const boatWaterY = 0.38 + Math.sin(time * 1.4 + lb.index + i * 0.3) * 0.14;
 
-      if (stage === 'waiting' || stage === 'approaching') {
+      const isActiveRescue = assignedToWarship
+        ? Boolean(warshipRescue?.active)
+        : stage === 'boarding' || stage === 'complete';
+
+      if (!isActiveRescue) {
         lb.occupantsGroup.visible = true;
         lb.rescued = false;
-        // Gentle idle station-keeping bob over the sinking site
-        const idleX = lb.boatGroup.position.x + Math.sin(time * 0.25 + i) * 0.12 * dt;
-        const idleZ = lb.boatGroup.position.z + Math.cos(time * 0.2 + i) * 0.12 * dt;
+        // Conscious station-keeping: maintain safe inter-boat spacing while waiting
+        let sepX = Math.sin(time * 0.25 + i) * 0.18;
+        let sepZ = Math.cos(time * 0.2 + i) * 0.18;
+        for (let oj = 0; oj < lifeboats.length; oj++) {
+          if (oj === i || !lifeboats[oj].detached) continue;
+          const sx = lb.boatGroup.position.x - lifeboats[oj].boatGroup.position.x;
+          const sz = lb.boatGroup.position.z - lifeboats[oj].boatGroup.position.z;
+          const sd = Math.hypot(sx, sz);
+          if (sd < 9.0 && sd > 0.05) {
+            sepX += (sx / sd) * 1.4;
+            sepZ += (sz / sd) * 1.4;
+          }
+        }
+        const idleX = lb.boatGroup.position.x + sepX * dt;
+        const idleZ = lb.boatGroup.position.z + sepZ * dt;
         lb.boatGroup.position.set(idleX, boatWaterY, idleZ);
+        lb.boatX = idleX;
+        lb.boatZ = idleZ;
         lb.boatGroup.rotation.set(
           Math.sin(time * 1.3 + i) * 0.045,
           lb.side * 0.55 + Math.sin(time * 0.3 + i) * 0.08,
@@ -2106,33 +2700,62 @@ export function createCrewAndLifeboats(
         continue;
       }
 
-      // Boarding or Complete: each lifeboat rows cleanly to its Carpathia gangway ladder, transfers survivors, then clears astern
-      const tStart = waveIdx * 0.16;
-      const tDock = tStart + 0.18;
-      const tUnloadDone = tDock + 0.14;
+      // Active boarding toward either Escort Warship or RMS Carpathia
+      const orderIdx = assignedToWarship
+        ? Math.floor(i / 2)
+        : warshipRescue
+          ? Math.floor(i / 2)
+          : i;
+      const vesselRoot = assignedToWarship ? warshipRescue!.root : carpathiaRoot;
+      const vesselStations = assignedToWarship
+        ? warshipRescue!.boardingStationsLocal
+        : boardingStationsLocal;
+      const vesselProgress = assignedToWarship ? warshipRescue!.progress : boardingProgress;
 
-      const isUnloaded = boardingProgress >= tUnloadDone;
-      const isDocking = boardingProgress >= tStart;
+      const waveIdx = Math.floor(orderIdx / 4);
+      const slotIdx = orderIdx % vesselStations.length;
+      const st = vesselStations[slotIdx];
 
-      // Target coordinate in Carpathia local space -> world -> shipRoot local space
-      const carpLocalX = isUnloaded
-        ? st.side * (14.5 + waveIdx * 3.4)
-        : st.x + st.side * (1.2 + (waveIdx % 2) * 0.35);
-      const carpLocalZ = isUnloaded ? 44 + waveIdx * 10 + (slotIdx % 2) * 7 : st.z;
+      const waveSpan = assignedToWarship || warshipRescue ? 0.34 : 0.16;
+      const tStart = waveIdx * waveSpan;
+      const tDock = tStart + 0.22;
+      const tUnloadDone = Math.min(0.96, tDock + 0.22);
 
-      _tmpWorldPos.set(carpLocalX, boatWaterY, carpLocalZ).applyMatrix4(carpathiaRoot.matrixWorld);
+      const isUnloaded = vesselProgress >= tUnloadDone;
+      const isDocking = vesselProgress >= tStart;
+
+      const targetLocalX = isUnloaded
+        ? st.side * (16.2 + waveIdx * 3.6)
+        : st.x + st.side * (1.25 + (waveIdx % 2) * 0.35);
+      const targetLocalZ = isUnloaded ? 52 + waveIdx * 11 + (slotIdx % 2) * 7 : st.z;
+
+      _tmpWorldPos.set(targetLocalX, boatWaterY, targetLocalZ).applyMatrix4(vesselRoot.matrixWorld);
       shipRoot.worldToLocal(_tmpWorldPos);
 
-      const dx = _tmpWorldPos.x - lb.boatGroup.position.x;
-      const dz = _tmpWorldPos.z - lb.boatGroup.position.z;
+      let dx = _tmpWorldPos.x - lb.boatGroup.position.x;
+      let dz = _tmpWorldPos.z - lb.boatGroup.position.z;
       const dist = Math.hypot(dx, dz);
       const isMoving = isDocking && dist > 1.1;
 
       if (isMoving) {
-        const speed = isUnloaded ? 3.8 : 6.4;
+        // Inter-boat spacing awareness during boarding convergence
+        for (let oj = 0; oj < lifeboats.length; oj++) {
+          if (oj === i || !lifeboats[oj].detached) continue;
+          const sx = lb.boatGroup.position.x - lifeboats[oj].boatGroup.position.x;
+          const sz = lb.boatGroup.position.z - lifeboats[oj].boatGroup.position.z;
+          const sd = Math.hypot(sx, sz);
+          if (sd < 7.2 && sd > 0.05) {
+            dx += (sx / sd) * 3.0;
+            dz += (sz / sd) * 3.0;
+          }
+        }
+        const mDist = Math.hypot(dx, dz) || 1;
+        const speed = isUnloaded ? 4.2 : 7.4;
         const step = Math.min(dist, speed * dt);
-        lb.boatGroup.position.x += (dx / dist) * step;
-        lb.boatGroup.position.z += (dz / dist) * step;
+        lb.boatGroup.position.x += (dx / mDist) * step;
+        lb.boatGroup.position.z += (dz / mDist) * step;
+        lb.boatX = lb.boatGroup.position.x;
+        lb.boatZ = lb.boatGroup.position.z;
         const targetYaw = Math.atan2(-dx, -dz);
         let dy = targetYaw - lb.boatGroup.rotation.y;
         while (dy > Math.PI) dy -= Math.PI * 2;
@@ -2152,29 +2775,51 @@ export function createCrewAndLifeboats(
         oar.rotation.x = Math.cos(time * (isMoving ? 3.1 : 1.1) + i) * (isMoving ? 0.16 : 0.04);
       }
 
-      // Transfer survivors as boat holds beside Carpathia's ladder
       const unloadProgress = THREE.MathUtils.clamp(
-        (boardingProgress - tDock) / (tUnloadDone - tDock),
+        (vesselProgress - tDock) / Math.max(0.05, tUnloadDone - tDock),
         0,
         1,
       );
-      if (unloadProgress >= 0.85 || dist < 4.5 && boardingProgress >= tUnloadDone * 0.92) {
+      if (unloadProgress >= 0.85 || (dist < 4.5 && vesselProgress >= tUnloadDone * 0.92)) {
         lb.rescued = true;
       }
+
       if (lb.rescued) {
-        boatsRecovered += 1;
-        fractionalSurvivors += 1;
         lb.occupantsGroup.visible = false;
+        if (assignedToWarship) {
+          warshipBoatsRecovered += 1;
+          warshipFrac += 1;
+        } else {
+          carpathiaBoatsRecovered += 1;
+          carpathiaFrac += 1;
+        }
       } else {
         lb.occupantsGroup.visible = true;
-        if (boardingProgress > tDock && dist < 8.5) {
-          fractionalSurvivors += unloadProgress * 0.85;
+        if (vesselProgress > tDock && dist < 8.5) {
+          if (assignedToWarship) warshipFrac += unloadProgress * 0.85;
+          else carpathiaFrac += unloadProgress * 0.85;
         }
       }
     }
 
-    const survivorsRescued = Math.min(712, Math.round((fractionalSurvivors / lifeboats.length) * 712));
-    return { boatsRecovered, survivorsRescued };
+    const warshipSurvivorsRescued =
+      warshipBoatTotal > 0 ? Math.min(356, Math.round((warshipFrac / warshipBoatTotal) * 356)) : 0;
+    const carpathiaShare = warshipBoatTotal > 0 ? 356 : 712;
+    const carpathiaSurvivorsRescued = Math.min(
+      carpathiaShare,
+      Math.round((carpathiaFrac / Math.max(1, carpathiaBoatTotal)) * carpathiaShare),
+    );
+    const boatsRecovered = warshipBoatsRecovered + carpathiaBoatsRecovered;
+    const survivorsRescued = Math.min(712, warshipSurvivorsRescued + carpathiaSurvivorsRescued);
+
+    return {
+      boatsRecovered,
+      survivorsRescued,
+      warshipBoatsRecovered,
+      warshipSurvivorsRescued,
+      carpathiaBoatsRecovered,
+      carpathiaSurvivorsRescued,
+    };
   };
 
   const reset = () => {
@@ -2199,8 +2844,9 @@ export function createCrewAndLifeboats(
         a.rotY = a.baseRotY;
         a.goingForward = true;
         a.pauseTimer = 0;
+        a.intent = a.isWalker ? 'stroll' : 'rail_watch';
       }
-      stepCrowdBatch(batch, 0, 0, false, false, false);
+      stepCrowdBatch(batch, 0, 0, 0, false, false);
     }
 
     for (const lb of lifeboats) {
@@ -2210,6 +2856,9 @@ export function createCrewAndLifeboats(
         lb.detached = false;
       }
       lb.rescued = false;
+      lb.boatX = lb.side * 17.5;
+      lb.boatZ = lb.baseZ;
+      lb.boatYaw = lb.side * 0.25;
       lb.davitForeArm.rotation.set(0, 0, 0);
       lb.davitAftArm.rotation.set(0, 0, 0);
       lb.ropeFore.visible = true;
@@ -2223,6 +2872,21 @@ export function createCrewAndLifeboats(
       lb.lanternMesh.visible = false;
       lb.boatGroup.position.set(lb.side * 12.95, 13.85, lb.baseZ);
       lb.boatGroup.rotation.set(0, 0, 0);
+    }
+  };
+
+  const getFloatingLifeboats = (out: FloatingLifeboatHazard[]) => {
+    out.length = 0;
+    for (let i = 0; i < lifeboats.length; i++) {
+      const lb = lifeboats[i];
+      if (!lb.detached) continue;
+      lb.boatGroup.getWorldPosition(_tmpWorldPos);
+      out.push({
+        index: i,
+        x: _tmpWorldPos.x,
+        z: _tmpWorldPos.z,
+        radius: 3.8,
+      });
     }
   };
 
@@ -2242,6 +2906,7 @@ export function createCrewAndLifeboats(
     updateCruising,
     updateSinking,
     updateRescue,
+    getFloatingLifeboats,
     reset,
     setLanternPower,
     dispose,

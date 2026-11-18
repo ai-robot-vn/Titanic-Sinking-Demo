@@ -5,6 +5,12 @@ export interface OceanUniforms {
   uShipPos: { value: THREE.Vector2 };
   uShipForward: { value: THREE.Vector2 };
   uShipSpeed: { value: number };
+  uWarshipPos: { value: THREE.Vector2 };
+  uWarshipForward: { value: THREE.Vector2 };
+  uWarshipSpeed: { value: number };
+  uWarship2Pos: { value: THREE.Vector2 };
+  uWarship2Forward: { value: THREE.Vector2 };
+  uWarship2Speed: { value: number };
   uNightMix: { value: number };
   uCameraPos: { value: THREE.Vector3 };
   uUnderwaterMix: { value: number };
@@ -21,6 +27,14 @@ export interface OceanAndSkyRig {
     headingRad: number,
     speedKnots: number,
     nightMix?: number,
+    warshipX?: number,
+    warshipZ?: number,
+    warshipHeadingRad?: number,
+    warshipSpeedKnots?: number,
+    warship2X?: number,
+    warship2Z?: number,
+    warship2HeadingRad?: number,
+    warship2SpeedKnots?: number,
   ) => void;
   updateCameraView: (camPos: THREE.Vector3, underwaterMix: number) => void;
   dispose: () => void;
@@ -39,6 +53,12 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     uShipPos: { value: new THREE.Vector2(0, 0) },
     uShipForward: { value: new THREE.Vector2(0, -1) },
     uShipSpeed: { value: 0 },
+    uWarshipPos: { value: new THREE.Vector2(-86, -265) },
+    uWarshipForward: { value: new THREE.Vector2(0, -1) },
+    uWarshipSpeed: { value: 0 },
+    uWarship2Pos: { value: new THREE.Vector2(92, -280) },
+    uWarship2Forward: { value: new THREE.Vector2(0, -1) },
+    uWarship2Speed: { value: 0 },
     uNightMix: { value: 1 },
     uCameraPos: { value: new THREE.Vector3(0, 15, 0) },
     uUnderwaterMix: { value: 0 },
@@ -64,6 +84,12 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     shader.uniforms.uShipPos = uniforms.uShipPos;
     shader.uniforms.uShipForward = uniforms.uShipForward;
     shader.uniforms.uShipSpeed = uniforms.uShipSpeed;
+    shader.uniforms.uWarshipPos = uniforms.uWarshipPos;
+    shader.uniforms.uWarshipForward = uniforms.uWarshipForward;
+    shader.uniforms.uWarshipSpeed = uniforms.uWarshipSpeed;
+    shader.uniforms.uWarship2Pos = uniforms.uWarship2Pos;
+    shader.uniforms.uWarship2Forward = uniforms.uWarship2Forward;
+    shader.uniforms.uWarship2Speed = uniforms.uWarship2Speed;
     shader.uniforms.uNightMix = uniforms.uNightMix;
     shader.uniforms.uCameraPos = uniforms.uCameraPos;
     shader.uniforms.uUnderwaterMix = uniforms.uUnderwaterMix;
@@ -96,6 +122,12 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       uniform vec2 uShipPos;
       uniform vec2 uShipForward;
       uniform float uShipSpeed;
+      uniform vec2 uWarshipPos;
+      uniform vec2 uWarshipForward;
+      uniform float uWarshipSpeed;
+      uniform vec2 uWarship2Pos;
+      uniform vec2 uWarship2Forward;
+      uniform float uWarship2Speed;
       uniform float uNightMix;
       uniform vec3 uCameraPos;
       uniform float uUnderwaterMix;
@@ -165,6 +197,50 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
         float fade = exp(-max(0.0, distBehindBow) * 0.0055);
         float foamNoise = 0.62 + 0.38 * sin(vOceanWorldPos.x * 0.95 + uTime * 4.5) * cos(vOceanWorldPos.z * 0.95 - uTime * 3.8);
         wakeMask = clamp((arm * 0.9 + innerArm + hullRub * 0.52 + bowSplash * 1.3 + sternWash * 0.95) * fade * speedFactor * foamNoise, 0.0, 1.0);
+      }
+
+      // Escort Warship Kelvin bow wake, hull foam & stern wash (146m x 23.2m hull)
+      float wSpeedFactor = clamp(abs(uWarshipSpeed) / 18.0, 0.0, 1.35);
+      if (wSpeedFactor > 0.02) {
+        vec2 wRel = vOceanWorldPos.xz - uWarshipPos;
+        vec2 wFwd = normalize(uWarshipForward);
+        vec2 wRight = vec2(-wFwd.y, wFwd.x);
+        float wAlong = dot(wRel, wFwd); // +73 is bow tip, -73 is stern
+        float wSide = abs(dot(wRel, wRight));
+        float wDistBehind = 72.5 - wAlong;
+        if (wDistBehind > -3.0 && wDistBehind < 280.0) {
+          float wArmDist = abs(wSide - (1.8 + max(0.0, wDistBehind) * 0.21));
+          float wArm = exp(-wArmDist * wArmDist * 0.16);
+          float wHullRub = exp(-abs(wSide - 11.4) * 0.5) * step(-70.0, wAlong) * step(wAlong, 50.0);
+          float wBowSplash = exp(-((wAlong - 72.5) * (wAlong - 72.5) * 0.06 + wSide * wSide * 0.11));
+          float wSternWash = exp(-wSide * wSide * 0.07) * step(wAlong, -70.0) * exp(-max(0.0, -70.0 - wAlong) * 0.022);
+          float wFade = exp(-max(0.0, wDistBehind) * 0.008);
+          float wNoise = 0.65 + 0.35 * sin(vOceanWorldPos.x * 1.05 + uTime * 4.8) * cos(vOceanWorldPos.z * 1.05 - uTime * 4.1);
+          float wMask = clamp((wArm * 0.85 + wHullRub * 0.45 + wBowSplash * 1.2 + wSternWash * 0.9) * wFade * wSpeedFactor * wNoise, 0.0, 1.0);
+          wakeMask = max(wakeMask, wMask);
+        }
+      }
+
+      // Second Escort Warship Kelvin bow wake, hull foam & stern wash
+      float w2SpeedFactor = clamp(abs(uWarship2Speed) / 18.0, 0.0, 1.35);
+      if (w2SpeedFactor > 0.02) {
+        vec2 wRel2 = vOceanWorldPos.xz - uWarship2Pos;
+        vec2 wFwd2 = normalize(uWarship2Forward);
+        vec2 wRight2 = vec2(-wFwd2.y, wFwd2.x);
+        float wAlong2 = dot(wRel2, wFwd2);
+        float wSide2 = abs(dot(wRel2, wRight2));
+        float wDistBehind2 = 72.5 - wAlong2;
+        if (wDistBehind2 > -3.0 && wDistBehind2 < 280.0) {
+          float wArmDist2 = abs(wSide2 - (1.8 + max(0.0, wDistBehind2) * 0.21));
+          float wArm2 = exp(-wArmDist2 * wArmDist2 * 0.16);
+          float wHullRub2 = exp(-abs(wSide2 - 11.4) * 0.5) * step(-70.0, wAlong2) * step(wAlong2, 50.0);
+          float wBowSplash2 = exp(-((wAlong2 - 72.5) * (wAlong2 - 72.5) * 0.06 + wSide2 * wSide2 * 0.11));
+          float wSternWash2 = exp(-wSide2 * wSide2 * 0.07) * step(wAlong2, -70.0) * exp(-max(0.0, -70.0 - wAlong2) * 0.022);
+          float wFade2 = exp(-max(0.0, wDistBehind2) * 0.008);
+          float wNoise2 = 0.65 + 0.35 * sin(vOceanWorldPos.x * 1.05 + uTime * 4.8) * cos(vOceanWorldPos.z * 1.05 - uTime * 4.1);
+          float wMask2 = clamp((wArm2 * 0.85 + wHullRub2 * 0.45 + wBowSplash2 * 1.2 + wSternWash2 * 0.9) * wFade2 * w2SpeedFactor * wNoise2, 0.0, 1.0);
+          wakeMask = max(wakeMask, wMask2);
+        }
       }
 
       vec3 foamNight = vec3(0.76, 0.89, 0.98);
@@ -494,12 +570,26 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     headingRad: number,
     speedKnots: number,
     nightMix = 1.0,
+    warshipX = -86,
+    warshipZ = -265,
+    warshipHeadingRad = 0,
+    warshipSpeedKnots = 0,
+    warship2X = 92,
+    warship2Z = -280,
+    warship2HeadingRad = 0,
+    warship2SpeedKnots = 0,
   ) => {
     const clampedNight = THREE.MathUtils.clamp(nightMix, 0, 1);
     uniforms.uTime.value = time;
     uniforms.uShipPos.value.set(shipX, shipZ);
     uniforms.uShipForward.value.set(Math.sin(headingRad), -Math.cos(headingRad));
     uniforms.uShipSpeed.value = speedKnots;
+    uniforms.uWarshipPos.value.set(warshipX, warshipZ);
+    uniforms.uWarshipForward.value.set(Math.sin(warshipHeadingRad), -Math.cos(warshipHeadingRad));
+    uniforms.uWarshipSpeed.value = warshipSpeedKnots;
+    uniforms.uWarship2Pos.value.set(warship2X, warship2Z);
+    uniforms.uWarship2Forward.value.set(Math.sin(warship2HeadingRad), -Math.cos(warship2HeadingRad));
+    uniforms.uWarship2Speed.value = warship2SpeedKnots;
     uniforms.uNightMix.value = clampedNight;
 
     skyMat.uniforms.uNightMix.value = clampedNight;

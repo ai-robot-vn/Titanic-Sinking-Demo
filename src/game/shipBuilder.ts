@@ -22,6 +22,7 @@ export interface TitanicShipRig {
   warmBridgeLight: THREE.PointLight;
   crewAndLifeboats: CrewAndLifeboatSystem;
   setPowerLevel: (power: number) => void;
+  setEngineSpeed: (knots: number, dt: number) => void;
   setWheelhouseFloodLevel: (level: number, fadeFactor?: number) => void;
   setBreakupVisual: (broken: boolean, emberPower?: number) => void;
   dispose: () => void;
@@ -425,11 +426,60 @@ export function buildTitanicShip(
     new THREE.MeshStandardMaterial({
       map: textures.steelHullAlbedo,
       normalMap: textures.steelHullNormal,
-      normalScale: new THREE.Vector2(1.15, 1.15),
-      color: 0x1a212b,
-      roughness: 0.46,
-      metalness: 0.5,
+      normalScale: new THREE.Vector2(1.45, 1.45),
+      color: 0x202936,
+      roughness: 0.42,
+      metalness: 0.54,
       side: THREE.DoubleSide,
+    }),
+  );
+
+  const interiorMarbleMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.interiorMarbleAlbedo,
+      roughness: 0.28,
+      metalness: 0.08,
+    }),
+  );
+
+  const interiorPanelMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.interiorPanelAlbedo,
+      roughness: 0.56,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+    }),
+  );
+
+  const crimsonVelvetMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x6b1822,
+      roughness: 0.82,
+      metalness: 0.04,
+    }),
+  );
+
+  const linenClothMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xf4efe4,
+      roughness: 0.72,
+      metalness: 0.02,
+    }),
+  );
+
+  const engineGreenMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1e3f35,
+      roughness: 0.44,
+      metalness: 0.52,
+    }),
+  );
+
+  const polishedSteelMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xc2cbd6,
+      roughness: 0.22,
+      metalness: 0.88,
     }),
   );
 
@@ -641,20 +691,47 @@ export function buildTitanicShip(
   fwdWellDeck.receiveShadow = true;
   bowContent.add(fwdWellDeck);
 
-  // Lofted hull-conforming C-Deck / Shelter Deck sealing hull edge under B-Deck (z = -10..90 & 90..148)
-  const fwdShelterDeck = new THREE.Mesh(
-    trackGeo(buildLoftedWeatherDeck([-10, 10, 35, 65, BREAK_Z + 0.02], 0.04, 0.45, 0.0)),
+  // Lofted hull-conforming C-Deck / Shelter Deck sealing hull edge while leaving Grand Staircase & Engine Room shafts open
+  const fwdShelterFore = new THREE.Mesh(
+    trackGeo(buildLoftedWeatherDeck([-10, 10, 27.6], 0.04, 0.45, 0.0)),
     teakDeckMat,
   );
-  fwdShelterDeck.receiveShadow = true;
-  bowContent.add(fwdShelterDeck);
+  fwdShelterFore.receiveShadow = true;
+  bowContent.add(fwdShelterFore);
 
-  const aftShelterDeck = new THREE.Mesh(
-    trackGeo(buildLoftedWeatherDeck([BREAK_Z - 0.02, 110, 128, 138, 144, 148], 0.04, 0.45, 0.0)),
+  const fwdShelterAft = new THREE.Mesh(
+    trackGeo(buildLoftedWeatherDeck([39.0, 65, BREAK_Z + 0.02], 0.04, 0.45, 0.0)),
     teakDeckMat,
   );
-  aftShelterDeck.receiveShadow = true;
-  sternContent.add(aftShelterDeck);
+  fwdShelterAft.receiveShadow = true;
+  bowContent.add(fwdShelterAft);
+
+  for (const side of [-1, 1] as const) {
+    const stairCWing = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(8.5, 0.44, 11.8)), teakDeckMat);
+    stairCWing.position.set(side * 9.85, 6.62, 33.3);
+    bowContent.add(stairCWing);
+  }
+
+  // Aft Shelter Deck around Engine Room vertical sky-casing (z = 93.5..122, |x| < 9.2 open)
+  const aftShelterForeBand = new THREE.Mesh(
+    trackGeo(buildLoftedWeatherDeck([BREAK_Z - 0.02, 93.6], 0.04, 0.45, 0.0)),
+    teakDeckMat,
+  );
+  aftShelterForeBand.receiveShadow = true;
+  sternContent.add(aftShelterForeBand);
+
+  const aftShelterAft = new THREE.Mesh(
+    trackGeo(buildLoftedWeatherDeck([122.0, 134, 144, 148], 0.04, 0.45, 0.0)),
+    teakDeckMat,
+  );
+  aftShelterAft.receiveShadow = true;
+  sternContent.add(aftShelterAft);
+
+  for (const side of [-1, 1] as const) {
+    const engCWing = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.9, 0.44, 28.6)), teakDeckMat);
+    engCWing.position.set(side * 11.65, 6.62, 107.8);
+    sternContent.add(engCWing);
+  }
 
   // Solid forward & aft superstructure end bulkheads sealing C-Deck to B-Deck transitions
   const fwdBridgeBreak = new THREE.Mesh(
@@ -1003,64 +1080,114 @@ export function buildTitanicShip(
   addHullEdgeRail(sternContent, [170.5, 178, 185, 191, 194.8]);
 
   // =========================================================================
-  // 3. 158-METER MULTI-TIER SUPERSTRUCTURE (SPLIT AT z = 90) & STAIRCASE DOMES
+  // 3. 158-METER MULTI-TIER SUPERSTRUCTURE (HOLLOW AROUND ACCESSIBLE INTERIORS)
   // =========================================================================
-  // B-Deck Contoured White Superstructure Tier (flat seamless join at BREAK_Z)
+  // B-Deck Contoured White Superstructure Tier (hollowed around Staircase z=27.5..39.0 & Engine Casing z=93.5..122.0)
   for (const [z0, z1, bc, ac, bv, tgt] of [
-    [-10.0, BREAK_Z + 0.02, 3.0, 0.0, 0.0, bowContent],
-    [BREAK_Z - 0.02, 148.0, 0.0, 4.0, 0.0, sternContent],
+    [-10.0, 27.55, 3.0, 0.0, 0.0, bowContent],
+    [38.95, BREAK_Z + 0.02, 0.0, 0.0, 0.0, bowContent],
+    [BREAK_Z - 0.02, 93.55, 0.0, 0.0, 0.0, sternContent],
+    [121.95, 148.0, 0.0, 4.0, 0.0, sternContent],
   ] as const) {
-    const bDeckHalf = new THREE.Mesh(
+    const bSeg = new THREE.Mesh(
       trackGeo(buildCurvedDeckhouseGeo(13.45, z0, z1, 2.9, bc, ac, bv)),
       whitePaintMat,
     );
-    bDeckHalf.position.y = 6.72;
-    bDeckHalf.castShadow = true;
-    bDeckHalf.receiveShadow = true;
-    tgt.add(bDeckHalf);
+    bSeg.position.y = 6.72;
+    bSeg.castShadow = true;
+    bSeg.receiveShadow = true;
+    tgt.add(bSeg);
+  }
+  for (const side of [-1, 1] as const) {
+    const bStairWing = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(7.85, 2.9, 11.55)), whitePaintMat);
+    bStairWing.position.set(side * 9.52, 8.17, 33.25);
+    bowContent.add(bStairWing);
+
+    const bEngWing = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.25, 2.9, 28.5)), whitePaintMat);
+    bEngWing.position.set(side * 11.32, 8.17, 107.75);
+    sternContent.add(bEngWing);
   }
 
-  // A-Deck Teak Promenade Floor Overhang (top y = 9.86)
+  // A-Deck Teak Promenade Floor Overhang (top y = 9.86, open shaft at Grand Staircase z=27.5..39.0)
   for (const [z0, z1, bc, ac, bv, tgt] of [
-    [-10.4, BREAK_Z + 0.02, 3.0, 0.0, 0.0, bowContent],
+    [-10.4, 27.55, 3.0, 0.0, 0.0, bowContent],
+    [38.95, BREAK_Z + 0.02, 0.0, 0.0, 0.0, bowContent],
     [BREAK_Z - 0.02, 148.4, 0.0, 4.0, 0.0, sternContent],
   ] as const) {
-    const aFloorHalf = new THREE.Mesh(
+    const aFlr = new THREE.Mesh(
       trackGeo(buildCurvedDeckhouseGeo(13.6, z0, z1, 0.28, bc, ac, bv)),
       teakDeckMat,
     );
-    aFloorHalf.position.y = 9.58;
-    aFloorHalf.receiveShadow = true;
-    tgt.add(aFloorHalf);
+    aFlr.position.y = 9.58;
+    aFlr.receiveShadow = true;
+    tgt.add(aFlr);
+  }
+  for (const side of [-1, 1] as const) {
+    const aStairFlr = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(8.0, 0.28, 11.55)), teakDeckMat);
+    aStairFlr.position.set(side * 9.6, 9.72, 33.25);
+    bowContent.add(aStairFlr);
   }
 
-  // A-Deck Inset Promenade Saloon Wall
+  // A-Deck Inset Promenade Saloon Wall (hollowed around Staircase z=27.5..39.0 & First Class Lounge z=64.0..81.5)
   for (const [z0, z1, bc, ac, bv, tgt] of [
-    [-9.2, BREAK_Z + 0.02, 2.6, 0.0, 0.0, bowContent],
+    [-9.2, 27.55, 2.6, 0.0, 0.0, bowContent],
+    [38.95, 64.05, 0.0, 0.0, 0.0, bowContent],
+    [81.45, BREAK_Z + 0.02, 0.0, 0.0, 0.0, bowContent],
     [BREAK_Z - 0.02, 146.5, 0.0, 3.4, 0.0, sternContent],
   ] as const) {
-    const aHouseHalf = new THREE.Mesh(
+    const aWall = new THREE.Mesh(
       trackGeo(buildCurvedDeckhouseGeo(11.35, z0, z1, 2.82, bc, ac, bv)),
       whitePaintMat,
     );
-    aHouseHalf.position.y = 9.82;
-    aHouseHalf.castShadow = true;
-    aHouseHalf.receiveShadow = true;
-    tgt.add(aHouseHalf);
+    aWall.position.y = 9.82;
+    aWall.castShadow = true;
+    aWall.receiveShadow = true;
+    tgt.add(aWall);
+  }
+  for (const side of [-1, 1] as const) {
+    const aStairWing = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.75, 2.82, 11.55)), whitePaintMat);
+    aStairWing.position.set(side * 8.47, 11.23, 33.25);
+    bowContent.add(aStairWing);
+
+    // First Class Lounge Outer Clerestory Piers + Recessed Clear Windows along z = 64..81.5
+    const loungeSill = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.42, 0.92, 17.6)), whitePaintMat);
+    loungeSill.position.set(side * 11.14, 10.28, 72.75);
+    bowContent.add(loungeSill);
+
+    const loungeHeader = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.42, 0.42, 17.6)), whitePaintMat);
+    loungeHeader.position.set(side * 11.14, 12.44, 72.75);
+    bowContent.add(loungeHeader);
+
+    for (let wz = 64.5; wz <= 81.2; wz += 2.8) {
+      const pier = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.42, 1.38, 0.55)), whitePaintMat);
+      pier.position.set(side * 11.14, 11.42, wz);
+      bowContent.add(pier);
+    }
+
+    const loungePane = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(17.2, 1.35)), bridgeGlassMat);
+    loungePane.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+    loungePane.position.set(side * 11.18, 11.42, 72.75);
+    bowContent.add(loungePane);
   }
 
-  // Boat Deck Teak Floor (top y = 12.88)
+  // Boat Deck Teak Floor (top y = 12.88, open dome shaft over Grand Staircase z=27.5..39.0)
   for (const [z0, z1, bc, ac, bv, tgt] of [
-    [-10.2, BREAK_Z + 0.02, 3.0, 0.0, 0.0, bowContent],
+    [-10.2, 27.55, 3.0, 0.0, 0.0, bowContent],
+    [38.95, BREAK_Z + 0.02, 0.0, 0.0, 0.0, bowContent],
     [BREAK_Z - 0.02, 148.4, 0.0, 4.0, 0.0, sternContent],
   ] as const) {
-    const boatFloorHalf = new THREE.Mesh(
+    const bFlr = new THREE.Mesh(
       trackGeo(buildCurvedDeckhouseGeo(13.7, z0, z1, 0.3, bc, ac, bv)),
       teakDeckMat,
     );
-    boatFloorHalf.position.y = 12.58;
-    boatFloorHalf.receiveShadow = true;
-    tgt.add(boatFloorHalf);
+    bFlr.position.y = 12.58;
+    bFlr.receiveShadow = true;
+    tgt.add(bFlr);
+  }
+  for (const side of [-1, 1] as const) {
+    const boatStairFlr = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(8.1, 0.3, 11.55)), teakDeckMat);
+    boatStairFlr.position.set(side * 9.65, 12.73, 33.25);
+    bowContent.add(boatStairFlr);
   }
 
   // 72 Turned A-Deck Promenade Stanchion Pillars partitioned into bow/stern
@@ -1125,12 +1252,10 @@ export function buildTitanicShip(
     tgt.add(inst);
   }
 
-  // Boat Deck Deckhouses: Officer's Quarters, Staircase Houses, Marconi Shack, Lounge & Smoking Room
+  // Boat Deck Exterior Houses (Officer's Quarters, Lounge Clerestory Roof, Aft Houses)
   const deckhouses: Array<[number, number, number, number]> = [
     [6.6, 2.0, 20.5, 2.5], // Officer's Quarters
-    [6.4, 28.0, 38.5, 2.25], // Forward Grand Staircase
-    [5.8, 42.0, 51.5, 2.1], // Marconi Wireless Room & Gymnasium
-    [6.2, 64.0, 81.5, 2.15], // First Class Lounge
+    [6.2, 64.0, 81.5, 2.15], // First Class Lounge Clerestory Roof House
     [6.2, 92.0, 112.5, 2.15], // First Class Smoking Room
     [6.0, 118.5, 130.5, 2.2], // Aft Grand Staircase
     [5.6, 135.5, 145.5, 2.0], // Second Class Entrance House
@@ -1140,6 +1265,58 @@ export function buildTitanicShip(
     house.position.y = 12.86;
     house.castShadow = true;
     (z0 < BREAK_Z ? bowContent : sternContent).add(house);
+  }
+
+  // Hollow Forward Grand Staircase Boat-Deck Enclosure (z = 27.6..38.8) beneath the Dome
+  for (const side of [-1, 1] as const) {
+    const stairSideWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.45, 2.28, 11.4)), whitePaintMat);
+    stairSideWall.position.set(side * 6.05, 14.0, 33.2);
+    bowContent.add(stairSideWall);
+  }
+  for (const endZ of [27.7, 38.7]) {
+    const stairEndWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(12.5, 2.28, 0.45)), whitePaintMat);
+    stairEndWall.position.set(0, 14.0, endZ);
+    bowContent.add(stairEndWall);
+  }
+  // Boat-deck collar ring slab around stained-glass dome opening
+  for (const ez of [28.7, 37.7]) {
+    const roofRimZ = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(12.4, 0.24, 2.2)), whitePaintMat);
+    roofRimZ.position.set(0, 15.05, ez);
+    bowContent.add(roofRimZ);
+  }
+  for (const side of [-1, 1] as const) {
+    const roofRimX = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.3, 0.24, 7.2)), whitePaintMat);
+    roofRimX.position.set(side * 4.55, 15.05, 33.2);
+    bowContent.add(roofRimX);
+  }
+
+  // Hollow Marconi Wireless Room & Gymnasium on Boat Deck (z = 42.0..51.5, |x| <= 5.8)
+  const marconiFloor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(11.4, 0.14, 9.4)), interiorMarbleMat);
+  marconiFloor.position.set(0, 12.92, 46.75);
+  bowContent.add(marconiFloor);
+
+  const marconiRoof = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(12.0, 0.24, 9.8)), whitePaintMat);
+  marconiRoof.position.set(0, 15.04, 46.75);
+  marconiRoof.castShadow = true;
+  bowContent.add(marconiRoof);
+
+  for (const side of [-1, 1] as const) {
+    const mWain = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.3, 0.9, 9.4)), whitePaintMat);
+    mWain.position.set(side * 5.65, 13.34, 46.75);
+    bowContent.add(mWain);
+    const mHead = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.3, 0.42, 9.4)), whitePaintMat);
+    mHead.position.set(side * 5.65, 14.8, 46.75);
+    bowContent.add(mHead);
+    for (const pz of [42.2, 44.5, 46.8, 49.0, 51.3]) {
+      const mPier = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.3, 1.1, 0.45)), whitePaintMat);
+      mPier.position.set(side * 5.65, 14.22, pz);
+      bowContent.add(mPier);
+    }
+  }
+  for (const mz of [42.05, 51.45]) {
+    const mEnd = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(11.6, 2.15, 0.3)), interiorPanelMat);
+    mEnd.position.set(0, 13.98, mz);
+    bowContent.add(mEnd);
   }
 
   // Twin Sculpted Glowing Grand Staircase Stained-Glass Dome Skylights
@@ -1294,11 +1471,17 @@ export function buildTitanicShip(
       chime.position.set(px, 16.5, -3.15);
       funnelGroup.add(chime);
 
-      // Auxiliary iron steam-escape exhaust pipe up the aft flank of each funnel
+      // Auxiliary iron steam-escape exhaust pipe + service ladder rungs up the aft flank of each funnel
       const steamPipe = new THREE.Mesh(funnelPipeGeo, darkIronMat);
       steamPipe.scale.set(0.62, 0.96, 0.62);
       steamPipe.position.set(px * 0.9, 8.2, 2.95);
       funnelGroup.add(steamPipe);
+    }
+    const ladderRungGeo = trackGeo(new THREE.BoxGeometry(0.45, 0.05, 0.08));
+    for (let ly = 2.0; ly <= 17.5; ly += 0.95) {
+      const rung = new THREE.Mesh(ladderRungGeo, darkIronMat);
+      rung.position.set(0, ly, 3.02 - ly * 0.02);
+      funnelGroup.add(rung);
     }
 
     tgt.add(funnelGroup);
@@ -2257,6 +2440,389 @@ export function buildTitanicShip(
   whFloodMesh.renderOrder = 4;
   wheelhouse.add(whFloodMesh);
 
+  // =========================================================================
+  // 8. ACCESSIBLE HISTORICAL INTERIOR DECKS & PROPULSION SPACES
+  // =========================================================================
+  // --- A. FIRST CLASS GRAND STAIRCASE ATRIUM (z = 27.6..38.8, y = 2.4..15.1) ---
+  const stairGroup = new THREE.Group();
+  bowContent.add(stairGroup);
+
+  for (const wallX of [-5.58, 5.58]) {
+    const sWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.24, 10.6, 11.3)), mahoganyMat);
+    sWall.position.set(wallX, 7.6, 33.2);
+    stairGroup.add(sWall);
+  }
+  const sFwdWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(11.3, 10.6, 0.24)), mahoganyMat);
+  sFwdWall.position.set(0, 7.6, 27.65);
+  stairGroup.add(sFwdWall);
+  const sAftWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(11.3, 10.6, 0.24)), mahoganyMat);
+  sAftWall.position.set(0, 7.6, 38.75);
+  stairGroup.add(sAftWall);
+
+  // Landings at D-Deck (2.4), B-Deck (6.74), A-Deck (9.86) and Boat Deck (12.88)
+  for (const ly of [2.4, 6.74, 9.86, 12.88]) {
+    const mainLanding = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(11.0, 0.22, 3.2)), interiorMarbleMat);
+    mainLanding.position.set(0, ly - 0.08, 37.1);
+    stairGroup.add(mainLanding);
+    if (ly > 3) {
+      const foreGallery = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(11.0, 0.22, 2.6)), mahoganyMat);
+      foreGallery.position.set(0, ly - 0.08, 29.0);
+      stairGroup.add(foreGallery);
+
+      // Ornate gilt brass & wrought-iron balustrade around the open staircase shaft
+      const balRail = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(10.8, 0.1, 0.14)), brassMat);
+      balRail.position.set(0, ly + 0.92, 30.3);
+      stairGroup.add(balRail);
+      for (let bx = -4.8; bx <= 4.8; bx += 1.2) {
+        const post = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.035, 0.045, 0.92, 6)), brassMat);
+        post.position.set(bx, ly + 0.46, 30.3);
+        stairGroup.add(post);
+      }
+    }
+  }
+
+  // Sweeping Central Flight + Twin Side Flights between D-Deck -> B-Deck -> A-Deck -> Boat Deck
+  const stepGeo = trackGeo(new THREE.BoxGeometry(2.6, 0.16, 0.34));
+  for (const [yBot, yTop, zStart, zDir] of [
+    [2.4, 6.74, 30.4, 1],
+    [6.74, 9.86, 30.6, 1],
+    [9.86, 12.88, 30.8, 1],
+  ] as const) {
+    const steps = 11;
+    for (let s = 0; s < steps; s++) {
+      const t = s / (steps - 1);
+      const sy = THREE.MathUtils.lerp(yBot, yTop, t);
+      const sz = zStart + zDir * t * 4.4;
+      const step = new THREE.Mesh(stepGeo, mahoganyMat);
+      step.position.set(0, sy, sz);
+      stairGroup.add(step);
+    }
+    // Side balustrades
+    for (const sx of [-1.28, 1.28]) {
+      const incline = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.08, 0.12, 5.4)), brassMat);
+      incline.position.set(sx, (yBot + yTop) * 0.5 + 0.72, zStart + 2.2);
+      incline.rotation.x = Math.atan2(yTop - yBot, 4.4);
+      stairGroup.add(incline);
+    }
+  }
+
+  // Bronze Newel Cherub Lamp & "Honor and Glory Crowning Time" Clock Plaque on Fore Bulkhead
+  const clockFrame = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.8, 2.2, 0.25)), mahoganyMat);
+  clockFrame.position.set(0, 11.4, 27.85);
+  stairGroup.add(clockFrame);
+  const clockDial = new THREE.Mesh(trackGeo(new THREE.CircleGeometry(0.62, 20)), warmGlowMat);
+  clockDial.position.set(0, 11.45, 28.0);
+  stairGroup.add(clockDial);
+  const newelPed = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.22, 0.28, 1.25, 10)), bronzeMat);
+  newelPed.position.set(0, 10.5, 30.4);
+  stairGroup.add(newelPed);
+  const newelGlobe = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.24, 12, 12)), warmGlowMat);
+  newelGlobe.position.set(0, 11.32, 30.4);
+  stairGroup.add(newelGlobe);
+
+  const stairLight = new THREE.PointLight(0xffcb7d, 5.2, 22, 1.4);
+  stairLight.position.set(0, 13.9, 33.2);
+  bowContent.add(stairLight);
+
+  // --- B. MARCONI WIRELESS SHACK & GYMNASIUM (z = 42.0..51.5, y = 12.92..15.0) ---
+  const marconiGroup = new THREE.Group();
+  bowContent.add(marconiGroup);
+
+  const radioDesk = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.6, 0.82, 1.05)), mahoganyMat);
+  radioDesk.position.set(2.4, 13.38, 45.2);
+  marconiGroup.add(radioDesk);
+  const sparkCoilBox = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.95, 0.65, 0.55)), darkIronMat);
+  sparkCoilBox.position.set(2.4, 14.1, 44.95);
+  marconiGroup.add(sparkCoilBox);
+  const sparkGlow = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.11, 8, 8)), warmGlowMat);
+  sparkGlow.position.set(2.4, 14.2, 45.28);
+  marconiGroup.add(sparkGlow);
+  const morseKey = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.24, 0.08, 0.36)), brassMat);
+  morseKey.position.set(2.1, 13.84, 45.55);
+  marconiGroup.add(morseKey);
+
+  // Interior Dividing Bulkhead + Gymnasium Cycles & Rowing Bench
+  const gymDivider = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.2, 2.05, 6.2)), interiorPanelMat);
+  gymDivider.position.set(-0.6, 13.98, 45.2);
+  marconiGroup.add(gymDivider);
+  for (const gz of [44.2, 48.0]) {
+    const cycleFrame = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.36, 0.045, 8, 16)), darkIronMat);
+    cycleFrame.rotation.y = Math.PI / 2;
+    cycleFrame.position.set(-3.1, 13.45, gz);
+    marconiGroup.add(cycleFrame);
+    const handle = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.03, 0.03, 0.68, 8)), brassMat);
+    handle.position.set(-3.1, 13.86, gz - 0.25);
+    handle.rotation.z = Math.PI / 2;
+    marconiGroup.add(handle);
+  }
+  const marconiLight = new THREE.PointLight(0xffd28c, 3.8, 14, 1.5);
+  marconiLight.position.set(0.5, 14.72, 46.8);
+  bowContent.add(marconiLight);
+
+  // --- C. A-DECK FIRST CLASS LOUNGE (z = 64.0..81.5, y = 9.86..12.56) ---
+  const loungeGroup = new THREE.Group();
+  bowContent.add(loungeGroup);
+
+  const loungeFloor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(21.6, 0.14, 17.3)), crimsonVelvetMat);
+  loungeFloor.position.set(0, 9.88, 72.75);
+  loungeGroup.add(loungeFloor);
+
+  for (const lz of [64.15, 81.35]) {
+    const endWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(21.8, 2.68, 0.28)), interiorPanelMat);
+    endWall.position.set(0, 11.2, lz);
+    loungeGroup.add(endWall);
+  }
+  // Marble Fireplace Mantel + Velvet Settees + Oak Tables
+  const fireplace = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.2, 1.9, 0.65)), interiorMarbleMat);
+  fireplace.position.set(0, 10.85, 64.5);
+  loungeGroup.add(fireplace);
+  const hearthGlow = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.1, 0.68, 0.28)), warmGlowMat);
+  hearthGlow.position.set(0, 10.35, 64.82);
+  loungeGroup.add(hearthGlow);
+
+  for (const sx of [-6.4, 0, 6.4]) {
+    for (const sz of [68.8, 76.2]) {
+      const tableTop = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.95, 0.95, 0.08, 16)), mahoganyMat);
+      tableTop.position.set(sx, 10.65, sz);
+      loungeGroup.add(tableTop);
+      const tableLeg = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.12, 0.28, 0.72, 10)), mahoganyMat);
+      tableLeg.position.set(sx, 10.28, sz);
+      loungeGroup.add(tableLeg);
+      const lamp = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.16, 10, 10)), warmGlowMat);
+      lamp.position.set(sx, 10.88, sz);
+      loungeGroup.add(lamp);
+
+      for (const side of [-1, 1]) {
+        const sofa = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.75, 0.62, 0.85)), crimsonVelvetMat);
+        sofa.position.set(sx, 10.22, sz + side * 1.45);
+        loungeGroup.add(sofa);
+      }
+    }
+  }
+  const loungeLight = new THREE.PointLight(0xffcb78, 4.6, 22, 1.4);
+  loungeLight.position.set(0, 12.25, 72.8);
+  bowContent.add(loungeLight);
+
+  // --- D. D-DECK FIRST CLASS DINING SALOON (z = 39.5..66.5, y = 2.35..6.45) ---
+  const diningGroup = new THREE.Group();
+  bowContent.add(diningGroup);
+
+  const diningFloor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(23.6, 0.22, 27.0)), interiorMarbleMat);
+  diningFloor.position.set(0, 2.32, 53.0);
+  diningGroup.add(diningFloor);
+
+  const diningCeiling = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(23.6, 0.2, 27.0)), creamTrimMat);
+  diningCeiling.position.set(0, 6.4, 53.0);
+  diningGroup.add(diningCeiling);
+
+  for (const dz of [39.6, 66.4]) {
+    const dWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(23.6, 4.0, 0.28)), interiorPanelMat);
+    dWall.position.set(0, 4.35, dz);
+    diningGroup.add(dWall);
+  }
+  for (const side of [-1, 1]) {
+    const sWall = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.28, 4.0, 27.0)), interiorPanelMat);
+    sWall.position.set(side * 11.75, 4.35, 53.0);
+    diningGroup.add(sWall);
+    // Warm illuminated leaded window bays along both hull flanks
+    for (let wz = 42.5; wz <= 63.5; wz += 4.2) {
+      const bay = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(2.1, 1.7)), warmGlowMat);
+      bay.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+      bay.position.set(side * 11.58, 4.75, wz);
+      diningGroup.add(bay);
+    }
+  }
+
+  // Carved Georgian Columns + Linen-Draped Dining Tables & Velvet Chairs (InstancedMesh)
+  const dColGeo = trackGeo(new THREE.CylinderGeometry(0.28, 0.34, 4.0, 12));
+  for (const cx of [-6.8, -2.4, 2.4, 6.8]) {
+    for (let cz = 43.0; cz <= 63.0; cz += 5.0) {
+      const col = new THREE.Mesh(dColGeo, creamTrimMat);
+      col.position.set(cx, 4.35, cz);
+      diningGroup.add(col);
+    }
+  }
+
+  const diningTableSpots: Array<[number, number]> = [];
+  for (const tx of [-8.8, -4.6, 0, 4.6, 8.8]) {
+    for (let tz = 42.2; tz <= 63.8; tz += 4.3) {
+      diningTableSpots.push([tx, tz]);
+    }
+  }
+  const dTableInst = new THREE.InstancedMesh(
+    trackGeo(new THREE.BoxGeometry(1.75, 0.14, 1.75)),
+    linenClothMat,
+    diningTableSpots.length,
+  );
+  const dLampInst = new THREE.InstancedMesh(
+    trackGeo(new THREE.SphereGeometry(0.11, 8, 8)),
+    warmGlowMat,
+    diningTableSpots.length,
+  );
+  const dChairInst = new THREE.InstancedMesh(
+    trackGeo(new THREE.BoxGeometry(0.54, 0.72, 0.54)),
+    crimsonVelvetMat,
+    diningTableSpots.length * 4,
+  );
+  let dcIdx = 0;
+  for (let i = 0; i < diningTableSpots.length; i++) {
+    const [tx, tz] = diningTableSpots[i];
+    sDummy.position.set(tx, 3.16, tz);
+    sDummy.rotation.set(0, 0, 0);
+    sDummy.updateMatrix();
+    dTableInst.setMatrixAt(i, sDummy.matrix);
+
+    sDummy.position.set(tx, 3.44, tz);
+    sDummy.updateMatrix();
+    dLampInst.setMatrixAt(i, sDummy.matrix);
+
+    for (const [ox, oz] of [
+      [-1.08, 0],
+      [1.08, 0],
+      [0, -1.08],
+      [0, 1.08],
+    ]) {
+      sDummy.position.set(tx + ox, 2.78, tz + oz);
+      sDummy.updateMatrix();
+      dChairInst.setMatrixAt(dcIdx++, sDummy.matrix);
+    }
+  }
+  dTableInst.instanceMatrix.needsUpdate = true;
+  dLampInst.instanceMatrix.needsUpdate = true;
+  dChairInst.instanceMatrix.needsUpdate = true;
+  diningGroup.add(dTableInst, dLampInst, dChairInst);
+
+  const diningLight = new THREE.PointLight(0xffcc7e, 5.4, 28, 1.35);
+  diningLight.position.set(0, 5.75, 53.0);
+  bowContent.add(diningLight);
+
+  // --- E. AFT RECIPROCATING STEAM ENGINE ROOM (z = 93.6..121.8, y = -3.4..9.45) ---
+  const engineRoomGroup = new THREE.Group();
+  sternContent.add(engineRoomGroup);
+
+  const engFloor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(19.0, 0.35, 28.0)), darkIronMat);
+  engFloor.position.set(0, -3.55, 107.7);
+  engineRoomGroup.add(engFloor);
+
+  for (const ez of [93.7, 121.7]) {
+    const bulk = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(19.0, 13.0, 0.35)), darkIronMat);
+    bulk.position.set(0, 2.95, ez);
+    engineRoomGroup.add(bulk);
+  }
+  for (const side of [-1, 1]) {
+    const casingSide = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.32, 13.0, 28.0)), darkIronMat);
+    casingSide.position.set(side * 9.3, 2.95, 107.7);
+    engineRoomGroup.add(casingSide);
+
+    // Steel Grating Observation Catwalks at y = 1.65 & y = 5.45
+    for (const cy of [1.65, 5.45]) {
+      const catwalk = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.85, 0.14, 26.8)), polishedSteelMat);
+      catwalk.position.set(side * 8.2, cy, 107.7);
+      engineRoomGroup.add(catwalk);
+      const rail = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.06, 0.92, 26.8)), brassMat);
+      rail.position.set(side * 7.3, cy + 0.48, 107.7);
+      engineRoomGroup.add(rail);
+    }
+  }
+
+  // Twin Towering 4-Cylinder Triple-Expansion Steam Engines with Live Animated Crankshafts!
+  const crankshafts: THREE.Group[] = [];
+  const pistonRods: THREE.Mesh[] = [];
+  for (const side of [-1, 1]) {
+    const engX = side * 3.8;
+    const bedplate = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.2, 1.2, 20.5)), engineGreenMat);
+    bedplate.position.set(engX, -2.8, 107.7);
+    engineRoomGroup.add(bedplate);
+
+    const crankGrp = new THREE.Group();
+    crankGrp.position.set(engX, -1.6, 107.7);
+    const shaft = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.28, 0.28, 22.5, 12)), polishedSteelMat);
+    shaft.rotation.x = Math.PI / 2;
+    crankGrp.add(shaft);
+    for (let ci = 0; ci < 4; ci++) {
+      const cz = -6.75 + ci * 4.5;
+      const web = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.38, 1.35, 0.55)), polishedSteelMat);
+      web.position.set(0, 0.45, cz);
+      web.rotation.z = (ci * Math.PI) / 2;
+      crankGrp.add(web);
+    }
+    engineRoomGroup.add(crankGrp);
+    crankshafts.push(crankGrp);
+
+    // 4 Vertical Steam Cylinders + Polished Piston Rods + Brass Cylinder Heads + A-Frame Columns
+    for (let ci = 0; ci < 4; ci++) {
+      const cz = 101.0 + ci * 4.5;
+      const cylRadius = 0.95 + (ci === 3 ? 0.35 : ci === 0 ? -0.15 : 0.1);
+      const cylinder = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(cylRadius, cylRadius, 3.4, 18)),
+        engineGreenMat,
+      );
+      cylinder.position.set(engX, 5.2, cz);
+      engineRoomGroup.add(cylinder);
+
+      const head = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(cylRadius * 1.04, cylRadius * 1.04, 0.38, 18)),
+        brassMat,
+      );
+      head.position.set(engX, 7.05, cz);
+      engineRoomGroup.add(head);
+
+      for (const ax of [-1.55, 1.55]) {
+        const frameLeg = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.45, 6.2, 0.52)), engineGreenMat);
+        frameLeg.position.set(engX + ax, 0.8, cz);
+        frameLeg.rotation.z = ax > 0 ? 0.12 : -0.12;
+        engineRoomGroup.add(frameLeg);
+      }
+
+      const rod = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.14, 4.6, 10)), polishedSteelMat);
+      rod.position.set(engX, 1.35, cz);
+      engineRoomGroup.add(rod);
+      pistonRods.push(rod);
+    }
+  }
+  const engineLight = new THREE.PointLight(0xffbe66, 5.5, 28, 1.35);
+  engineLight.position.set(0, 6.8, 108.0);
+  sternContent.add(engineLight);
+
+  // =========================================================================
+  // 9. EXTRA EXTERIOR BRIDGE & FORECASTLE CLARITY DETAILS
+  // =========================================================================
+  // Forecastle Brass Ship's Bell on Turned Gallows Stand
+  const bellArch = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.55, 0.055, 8, 16, Math.PI)), darkIronMat);
+  bellArch.position.set(0, 10.1, -48.5);
+  bowContent.add(bellArch);
+  for (const bx of [-0.55, 0.55]) {
+    const leg = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.045, 0.06, 0.95, 8)), darkIronMat);
+    leg.position.set(bx, 9.65, -48.5);
+    bowContent.add(leg);
+  }
+  const shipBell = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.28, 0.42, 14)), brassMat);
+  shipBell.position.set(0, 10.35, -48.5);
+  bowContent.add(shipBell);
+
+  // Port & Starboard Bridge Wing Brass Chadburn Telegraphs
+  for (const side of [-1, 1]) {
+    const wingTelPed = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.1, 0.16, 0.98, 12)), brassMat);
+    wingTelPed.position.set(side * 14.3, 13.38, -1.65);
+    bowContent.add(wingTelPed);
+    const wingTelHead = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.2, 0.2, 0.14, 16)), brassMat);
+    wingTelHead.rotation.z = Math.PI / 2;
+    wingTelHead.position.set(side * 14.3, 13.95, -1.65);
+    bowContent.add(wingTelHead);
+  }
+
+  let enginePhase = 0;
+  const setEngineSpeed = (knots: number, dt: number) => {
+    enginePhase += knots * dt * 0.65;
+    for (let i = 0; i < crankshafts.length; i++) {
+      crankshafts[i].rotation.z = enginePhase * (i === 0 ? 1 : -1);
+    }
+    for (let i = 0; i < pistonRods.length; i++) {
+      const cyc = enginePhase + (i % 4) * (Math.PI / 2);
+      pistonRods[i].position.y = 1.25 + Math.sin(cyc) * 0.72;
+    }
+  };
+
   // Bridge Roof Searchlight Projector & Brass Yoke Pedestal
   const slPedestal = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.24, 0.34, 12)), brassMat);
   slPedestal.position.set(0, 16.02, -1.2);
@@ -2267,6 +2833,10 @@ export function buildTitanicShip(
   const slHousing = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.32, 0.28, 0.72, 14)), brassMat);
   slHousing.rotation.x = Math.PI / 2;
   searchlightHead.add(slHousing);
+  const slLens = new THREE.Mesh(trackGeo(new THREE.CircleGeometry(0.27, 14)), warmGlowMat);
+  slLens.rotation.y = Math.PI;
+  slLens.position.z = -0.37;
+  searchlightHead.add(slLens);
   bowContent.add(searchlightHead);
 
   const searchlightTarget = new THREE.Object3D();
@@ -2278,7 +2848,12 @@ export function buildTitanicShip(
     warmBridgeLight.intensity = 4.6 * p;
     boatDeckGlowFwd.intensity = 8.0 * p;
     boatDeckGlowAft.intensity = 7.5 * p;
-    warmGlowMat.emissiveIntensity = 1.85 * p;
+    stairLight.intensity = 5.2 * Math.max(0.32, p);
+    marconiLight.intensity = 3.8 * Math.max(0.32, p);
+    loungeLight.intensity = 4.6 * Math.max(0.32, p);
+    diningLight.intensity = 5.4 * Math.max(0.32, p);
+    engineLight.intensity = 5.5 * Math.max(0.32, p);
+    warmGlowMat.emissiveIntensity = 1.85 * Math.max(0.35, p);
     portholeGlowMat.emissiveIntensity = 1.65 * p;
     compassCardMat.emissiveIntensity = 0.78 * p;
     clinoFaceMat.emissiveIntensity = 0.45 * p;
@@ -2327,6 +2902,7 @@ export function buildTitanicShip(
     warmBridgeLight,
     crewAndLifeboats,
     setPowerLevel,
+    setEngineSpeed,
     setWheelhouseFloodLevel,
     setBreakupVisual,
     dispose: () => {

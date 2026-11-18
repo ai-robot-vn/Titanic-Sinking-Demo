@@ -403,6 +403,131 @@ export class SoundEngine {
     });
   }
 
+  public playAutopilotChime(enabled: boolean): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const notes = enabled ? [659.25, 880.0] : [659.25, 493.88];
+    notes.forEach((freq, i) => {
+      const osc = this.ctx!.createOscillator();
+      const gain = this.ctx!.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + i * 0.09);
+      gain.gain.setValueAtTime(0.11, now + i * 0.09);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.09 + 0.34);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + i * 0.09);
+      osc.stop(now + i * 0.09 + 0.36);
+    });
+  }
+
+  public playCrowdScreamPanic(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // 1. Multi-voice vocal-formant screaming chorus (male & female pitches, pitch-drop & vibrato)
+    const voices = [
+      { delay: 0.04, dur: 1.55, f0: 760, f1: 610, formant: 1450, vol: 0.09 },
+      { delay: 0.14, dur: 1.75, f0: 920, f1: 720, formant: 1750, vol: 0.085 },
+      { delay: 0.22, dur: 1.45, f0: 540, f1: 420, formant: 1120, vol: 0.085 },
+      { delay: 0.38, dur: 1.85, f0: 840, f1: 650, formant: 1620, vol: 0.08 },
+      { delay: 0.56, dur: 1.65, f0: 660, f1: 500, formant: 1280, vol: 0.075 },
+      { delay: 0.78, dur: 1.9, f0: 890, f1: 670, formant: 1680, vol: 0.075 },
+    ];
+
+    voices.forEach((v, idx) => {
+      const t0 = now + v.delay;
+      const osc = this.ctx!.createOscillator();
+      const lfo = this.ctx!.createOscillator();
+      const lfoGain = this.ctx!.createGain();
+      const bp = this.ctx!.createBiquadFilter();
+      const gain = this.ctx!.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(v.f0 * 0.92, t0);
+      osc.frequency.linearRampToValueAtTime(v.f0, t0 + 0.14);
+      osc.frequency.exponentialRampToValueAtTime(v.f1, t0 + v.dur);
+
+      // Vocal panic vibrato/tremolo
+      lfo.type = 'sine';
+      lfo.frequency.value = 6.5 + (idx % 3) * 1.4;
+      lfoGain.gain.value = 22;
+      lfo.connect(lfoGain);
+      lfoGain.connect(osc.frequency);
+
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(v.formant, t0);
+      bp.Q.value = 3.2;
+
+      gain.gain.setValueAtTime(0.001, t0);
+      gain.gain.linearRampToValueAtTime(v.vol, t0 + 0.12);
+      gain.gain.setValueAtTime(v.vol * 0.85, t0 + v.dur * 0.52);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + v.dur);
+
+      osc.connect(bp);
+      bp.connect(gain);
+      gain.connect(this.masterGain!);
+
+      osc.start(t0);
+      lfo.start(t0);
+      osc.stop(t0 + v.dur + 0.05);
+      lfo.stop(t0 + v.dur + 0.05);
+    });
+
+    // 2. Breath/crowd clamor wash layered behind vocal screams
+    const dur = 2.5;
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.sin((i / ch.length) * Math.PI);
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+
+    const crowdBp = this.ctx.createBiquadFilter();
+    crowdBp.type = 'bandpass';
+    crowdBp.frequency.value = 1150;
+    crowdBp.Q.value = 1.4;
+
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, now);
+    nGain.gain.linearRampToValueAtTime(0.12, now + 0.25);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noise.connect(crowdBp);
+    crowdBp.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+  }
+
+  public playPanicShoutBurst(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const base = 560 + Math.random() * 340;
+    const dur = 0.85 + Math.random() * 0.45;
+    const osc = this.ctx.createOscillator();
+    const bp = this.ctx.createBiquadFilter();
+    const gain = this.ctx.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(base, now);
+    osc.frequency.exponentialRampToValueAtTime(base * 0.76, now + dur);
+
+    bp.type = 'bandpass';
+    bp.frequency.value = base * 1.9;
+    bp.Q.value = 3.0;
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.055, now + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    osc.connect(bp);
+    bp.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + dur + 0.04);
+  }
+
   public updateSinkingAmbience(sinkProgress: number): void {
     if (!this.initialized || !this.ctx || !this.engineGain || !this.engineOsc1 || !this.engineOsc2 || !this.oceanNoiseGain || !this.oceanFilter) {
       return;
@@ -417,6 +542,117 @@ export class SoundEngine {
     // Rushing floodwater swells loudly
     this.oceanNoiseGain.gain.setTargetAtTime(0.14 + sinkProgress * 0.22, t, 0.2);
     this.oceanFilter.frequency.setTargetAtTime(340 + sinkProgress * 580, t, 0.2);
+  }
+
+  public playTorpedoLaunch(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(140, now);
+    osc.frequency.exponentialRampToValueAtTime(48, now + 0.32);
+    gain.gain.setValueAtTime(0.14, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.38);
+
+    const dur = 0.48;
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.14));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(750, now);
+    bp.frequency.exponentialRampToValueAtTime(240, now + dur);
+    bp.Q.value = 1.8;
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(0.12, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    noise.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+  }
+
+  public playNavalCannon(heavy: boolean): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const dur = heavy ? 0.95 : 0.45;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(heavy ? 115 : 175, now);
+    osc.frequency.exponentialRampToValueAtTime(heavy ? 28 : 46, now + dur * 0.65);
+    gain.gain.setValueAtTime(heavy ? 0.28 : 0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur * 0.72);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + dur * 0.75);
+
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * (heavy ? 0.25 : 0.12)));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(heavy ? 950 : 1450, now);
+    lp.frequency.exponentialRampToValueAtTime(160, now + dur);
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(heavy ? 0.34 : 0.18, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    noise.connect(lp);
+    lp.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+  }
+
+  public playSubmarineStruck(sunk: boolean): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const dur = sunk ? 1.45 : 0.82;
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(sunk ? 92 : 112, now);
+    osc.frequency.exponentialRampToValueAtTime(22, now + dur * 0.85);
+    gain.gain.setValueAtTime(sunk ? 0.38 : 0.26, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + dur + 0.05);
+
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * (sunk ? 0.42 : 0.22)));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(sunk ? 520 : 680, now);
+    bp.frequency.exponentialRampToValueAtTime(130, now + dur);
+    bp.Q.value = 1.4;
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(sunk ? 0.36 : 0.24, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    noise.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
   }
 
   public dispose(): void {

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { SoundEngine } from './audio';
 import { buildCarpathiaShip, CarpathiaRig } from './carpathiaBuilder';
+import { CruiseAwarenessContext, FloatingLifeboatHazard } from './charactersBuilder';
 import { buildSouthamptonHarbor, HarborRig } from './harborBuilder';
 import { IcebergEntity, IcebergFactory } from './icebergBuilder';
 import {
@@ -11,12 +12,14 @@ import {
   sampleOceanWaveHeight,
 } from './oceanAndSky';
 import { buildTitanicShip, BREAK_Z, TitanicShipRig } from './shipBuilder';
+import { buildSubmarineShip, SubmarineRig } from './submarineBuilder';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
+import { buildWarshipShip, WarshipRig } from './warshipBuilder';
 import {
+  AftermathFocusTarget,
   CameraMode,
   CarpathiaStage,
   GamePhase,
-  HARBOR_CHAPTERS,
   IcebergVariant,
   TARGET_VOYAGE_NM,
   TELEGRAPH_NOTCHES,
@@ -33,7 +36,54 @@ const _vCamPos = new THREE.Vector3();
 const _vLookDir = new THREE.Vector3();
 const _vFocusLocal = new THREE.Vector3();
 const _vFocusWorld = new THREE.Vector3();
+const _projDummy = new THREE.Object3D();
+const _projColor = new THREE.Color();
 
+type SubmarineState = 'hidden' | 'hunting' | 'sinking' | 'sunk';
+
+interface SubmarineEntity {
+  id: number;
+  label: string;
+  rig: SubmarineRig;
+  state: SubmarineState;
+  x: number;
+  z: number;
+  headingRad: number;
+  speedKnots: number;
+  diveY: number;
+  damagePitch: number;
+  damageRoll: number;
+  hp: number;
+  maxHp: number;
+  gunYaw: number;
+  gunFireFlash: number;
+  hitFireIntensity: number;
+  torpedoCooldown: number;
+  gunCooldown: number;
+  sideSign: -1 | 1;
+  sinkElapsed: number;
+  wakeAccum: number;
+  targetVessel: 'titanic' | 'carpathia';
+}
+
+interface NavalProjectile {
+  active: boolean;
+  kind: 'torpedo' | 'subShell' | 'warshipShell';
+  ownerSide: 'submarine' | 'warship';
+  targetKind: 'titanic' | 'carpathia' | 'submarine';
+  targetSubId: number;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  life: number;
+  maxLife: number;
+  wakeAccum: number;
+}
+
+const MAX_NAVAL_PROJECTILES = 28;
 const BEST_SCORE_KEY = 'titanic_bridge_best_score_v1';
 
 const HULL_CHECK_POINTS: Array<{ zLocal: number; radius: number }> = [
@@ -47,6 +97,12 @@ const HULL_CHECK_POINTS: Array<{ zLocal: number; radius: number }> = [
   { zLocal: 184, radius: 6.5 },
 ];
 
+const WARSHIP_HULL_POINTS: Array<{ zLocal: number; radius: number }> = [
+  { zLocal: -52, radius: 7.2 },
+  { zLocal: 0, radius: 11.2 },
+  { zLocal: 52, radius: 8.6 },
+];
+
 export class TitanicEngine {
   private readonly container: HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -57,6 +113,8 @@ export class TitanicEngine {
   private readonly textures: ProceduralTextureSet;
   private readonly ship: TitanicShipRig;
   private readonly carpathia: CarpathiaRig;
+  private readonly warship: WarshipRig;
+  private readonly warship2: WarshipRig;
   private readonly harbor: HarborRig;
   private readonly oceanAndSky: OceanAndSkyRig;
   private readonly iceFactory: IcebergFactory;
@@ -104,7 +162,13 @@ export class TitanicEngine {
   private rescueCompleteWhistlePlayed = false;
   private survivorsRescued = 0;
   private boatsRecovered = 0;
+  private warshipRescuing = false;
+  private warshipRescueProgress = 0;
+  private warshipRescueWhistlePlayed = false;
+  private warshipSurvivors = 0;
+  private warshipBoatsRecovered = 0;
   private focusCarpathia = false;
+  private aftermathFocus: AftermathFocusTarget = 'lifeboats';
   private flareCooldown = 4.0;
   private score = 0;
   private bestScore = 0;
@@ -125,9 +189,10 @@ export class TitanicEngine {
   private eventTimer = 0;
   private icebergWarning: string | null = null;
 
-  // Free 360° mouse orbit, zoom & vessel focus spot camera
+  // Free 360° mouse orbit, zoom & vessel focus spot / interior walk camera
   private focusSpotIndex = 0;
   private camFocusLocal = new THREE.Vector3(0, 14.78, 1.32);
+  private interiorWalkOffset = new THREE.Vector3();
   private orbitYaw = 0;
   private orbitPitch = 0.085;
   private orbitDistance = 0;
@@ -142,18 +207,69 @@ export class TitanicEngine {
   private lastPointerX = 0;
   private lastPointerY = 0;
 
-  // Harbor Introduction & Day-to-Night Time-Skip State
-  private harborChapterIndex = 0;
-  private harborProgress = 0;
-  private harborAutoPlay = true;
-  private userOverrodeHarborCam = false;
-  private timeSkipProgress = 0;
+  // Dynamic Harbor-to-Atlantic Night Progression & Collision Cooldowns
   private nightMix = 0;
   private rescueDawnMix = 0;
   private wheelhouseFloodLevel = 0;
+  private initialIceSeeded = false;
+  private readonly obstacleCooldowns = new Map<string, number>();
+  private readonly floatingBoatHazards: FloatingLifeboatHazard[] = [];
   private readonly tempSkyColor = new THREE.Color();
   private readonly tempColorA = new THREE.Color();
   private readonly tempColorB = new THREE.Color();
+
+  // Pre-allocated consciousness & awareness state (zero per-frame GC)
+  private readonly cruiseAwareness: CruiseAwarenessContext = {};
+  private bridgeOrderTimer = 0;
+  private closestHazardSide = 0;
+  private carpathiaAvoidX = 0;
+  private carpathiaAvoidZ = 0;
+  private carpathiaSteerYaw = 0;
+  private autopilotEnabled = false;
+  private autopilotTargetRudder = 0;
+  private autopilotSpeedCooldown = 0;
+  private bowPanicActive = false;
+  private panicShoutCooldown = 0;
+
+  // Royal Navy Escort Warships (1: Port/Astern Wake, 2: Starboard Flank Wake)
+  private warshipX = -86;
+  private warshipZ = -265;
+  private warshipHeadingRad = 0.04;
+  private warshipYawRate = 0;
+  private warshipSpeedKnots = 0;
+  private warshipRoll = 0;
+  private warshipHasJoinedWake = false;
+  private warshipSmokeAccum = 0;
+  private warshipSprayAccum = 0;
+  private warship1FireFlash = 0;
+  private warship1FireCooldown = 1.6;
+  private warship1AimLocalX = 0;
+  private warship1AimLocalZ = -120;
+  private warship1Engaged = false;
+
+  private warship2X = 92;
+  private warship2Z = -280;
+  private warship2HeadingRad = -0.04;
+  private warship2YawRate = 0;
+  private warship2SpeedKnots = 0;
+  private warship2Roll = 0;
+  private warship2HasJoinedWake = false;
+  private warship2SmokeAccum = 0;
+  private warship2SprayAccum = 0;
+  private warship2FireFlash = 0;
+  private warship2FireCooldown = 2.6;
+  private warship2AimLocalX = 0;
+  private warship2AimLocalZ = -120;
+  private warship2Engaged = false;
+
+  // Hostile U-Boat Submarines & Pooled Projectiles (Torpedoes & Naval Shells)
+  private readonly submarines: SubmarineEntity[] = [];
+  private readonly projectiles: NavalProjectile[] = [];
+  private readonly projectileMesh: THREE.InstancedMesh;
+  private submarineCruiseTriggered = false;
+  private submarineAftermathTriggered = false;
+  private cruiseSubTimer = 0;
+  private submarinesSunk = 0;
 
   // Iceberg management
   private readonly icebergs: IcebergEntity[] = [];
@@ -208,7 +324,7 @@ export class TitanicEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = 1.22;
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2),
     );
@@ -272,6 +388,74 @@ export class TitanicEngine {
     this.carpathia = buildCarpathiaShip(this.textures, this.isSoftwareGl);
     this.scene.add(this.carpathia.root);
 
+    this.warship = buildWarshipShip(this.textures, this.isSoftwareGl);
+    this.scene.add(this.warship.root);
+
+    this.warship2 = buildWarshipShip(this.textures, this.isSoftwareGl);
+    this.scene.add(this.warship2.root);
+
+    for (let i = 0; i < 2; i++) {
+      const rig = buildSubmarineShip(this.isSoftwareGl);
+      rig.root.visible = false;
+      this.scene.add(rig.root);
+      this.submarines.push({
+        id: i,
+        label: i === 0 ? 'U-14' : 'U-17',
+        rig,
+        state: 'hidden',
+        x: 0,
+        z: 0,
+        headingRad: 0,
+        speedKnots: 12,
+        diveY: -12,
+        damagePitch: 0,
+        damageRoll: 0,
+        hp: 3,
+        maxHp: 3,
+        gunYaw: 0,
+        gunFireFlash: 0,
+        hitFireIntensity: 0,
+        torpedoCooldown: 3.5 + i * 2.5,
+        gunCooldown: 2.2 + i * 1.8,
+        sideSign: i === 0 ? -1 : 1,
+        sinkElapsed: 0,
+        wakeAccum: 0,
+        targetVessel: 'titanic',
+      });
+    }
+
+    const projGeo = new THREE.CylinderGeometry(0.18, 0.24, 2.2, 8);
+    projGeo.rotateX(Math.PI / 2);
+    const projMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.projectileMesh = new THREE.InstancedMesh(projGeo, projMat, MAX_NAVAL_PROJECTILES);
+    this.projectileMesh.frustumCulled = false;
+    for (let i = 0; i < MAX_NAVAL_PROJECTILES; i++) {
+      this.projectiles.push({
+        active: false,
+        kind: 'warshipShell',
+        ownerSide: 'warship',
+        targetKind: 'submarine',
+        targetSubId: 0,
+        x: 0,
+        y: -50,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0,
+        maxLife: 1,
+        wakeAccum: 0,
+      });
+      _projDummy.position.set(0, -50, 0);
+      _projDummy.scale.setScalar(0.001);
+      _projDummy.updateMatrix();
+      this.projectileMesh.setMatrixAt(i, _projDummy.matrix);
+      this.projectileMesh.setColorAt(i, _projColor.setHex(0xfff3b0));
+    }
+    this.projectileMesh.instanceMatrix.needsUpdate = true;
+    if (this.projectileMesh.instanceColor) this.projectileMesh.instanceColor.needsUpdate = true;
+    this.scene.add(this.projectileMesh);
+
     // Searchlight SpotLight attached to forward bridge roof (sinks with bow half)
     this.searchSpotLight = new THREE.SpotLight(0xeef8ff, 24, 480, Math.PI / 9, 0.55, 1.1);
     this.searchSpotLight.position.set(0, 16.25, -1.5);
@@ -283,11 +467,27 @@ export class TitanicEngine {
     this.scene.add(this.particles.mesh);
 
     // Start Title screen in bright sunlit Southampton Harbor Berth 44
+    this.resetWarshipPose(false);
     this.applyAtmosphere(0);
-    this.oceanAndSky.update(0, 0, 0, 0, 0, 0);
+    this.oceanAndSky.update(
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      this.warshipX,
+      this.warshipZ,
+      this.warshipHeadingRad,
+      this.warshipSpeedKnots,
+      this.warship2X,
+      this.warship2Z,
+      this.warship2HeadingRad,
+      this.warship2SpeedKnots,
+    );
     this.updateTitleCamera();
     this.oceanAndSky.updateCameraView(this.camera.position, 0);
-    this.harbor.update(0, 0, 0);
+    this.harbor.update(0, 0, 0, 0, 0, 0, 0, 0, false);
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
@@ -301,18 +501,25 @@ export class TitanicEngine {
 
   private seedInitialIcebergs(): void {
     this.clearIcebergs();
-    const initialSet: Array<{ variant: IcebergVariant; x: number; z: number; scale: number }> = [
-      { variant: 'pinnacle', x: -46, z: -185, scale: 1.05 },
-      { variant: 'tabular', x: 52, z: -245, scale: 1.15 },
-      { variant: 'growler', x: -16, z: -290, scale: 0.95 },
-      { variant: 'pinnacle', x: 64, z: -360, scale: 1.2 },
-      { variant: 'tabular', x: -62, z: -395, scale: 1.0 },
+    const fwdX = Math.sin(this.headingRad);
+    const fwdZ = -Math.cos(this.headingRad);
+    const rightX = Math.cos(this.headingRad);
+    const rightZ = Math.sin(this.headingRad);
+    const initialSet: Array<{ variant: IcebergVariant; lateral: number; ahead: number; scale: number }> = [
+      { variant: 'pinnacle', lateral: -46, ahead: 195, scale: 1.05 },
+      { variant: 'tabular', lateral: 52, ahead: 255, scale: 1.15 },
+      { variant: 'growler', lateral: -16, ahead: 300, scale: 0.95 },
+      { variant: 'pinnacle', lateral: 64, ahead: 370, scale: 1.2 },
+      { variant: 'tabular', lateral: -62, ahead: 410, scale: 1.0 },
     ];
     for (const item of initialSet) {
-      const berg = this.iceFactory.spawnIceberg(item.variant, item.x, item.z, item.scale);
+      const sx = this.shipX + fwdX * item.ahead + rightX * item.lateral;
+      const sz = this.shipZ + fwdZ * item.ahead + rightZ * item.lateral;
+      const berg = this.iceFactory.spawnIceberg(item.variant, sx, sz, item.scale);
       this.icebergs.push(berg);
       this.scene.add(berg.group);
     }
+    this.initialIceSeeded = true;
   }
 
   private clearIcebergs(): void {
@@ -320,71 +527,12 @@ export class TitanicEngine {
       this.scene.remove(b.group);
     }
     this.icebergs.length = 0;
+    this.initialIceSeeded = false;
   }
 
   // =========================================================================
   // PUBLIC CONTROLS FOR REACT UI & KEYBOARD
   // =========================================================================
-  public startHarborIntro(): void {
-    this.sound.unlock();
-    this.clearIcebergs();
-    this.phase = 'harbor';
-    this.endlessMode = false;
-    this.shipX = 0;
-    this.shipZ = 0;
-    this.headingRad = 0;
-    this.yawRate = 0;
-    this.rudderDeg = 0;
-    this.manualRudderTarget = null;
-    this.wheelVisualAngle = 0;
-    this.rollAngle = 0;
-    this.telegraphIndex = 2; // SLOW AHEAD departing harbor
-    this.speedKnots = 0;
-    this.distanceNm = 0;
-    this.hullIntegrity = 100;
-    this.floodingPct = 0;
-    this.waterIngressRate = 0;
-    this.listDirection = 1;
-    this.sinkProgress = 0;
-    this.sinkDropY = 0;
-    this.sinkPitch = 0;
-    this.sinkList = 0;
-    this.powerLevel = 1;
-    this.lifeboatsLaunched = 0;
-    this.score = 0;
-    this.nearMissCount = 0;
-    this.combo = 1;
-    this.searchlightTimer = 0;
-    this.searchlightCooldown = 0;
-    this.hitstopTimer = 0;
-    this.shakeIntensity = 0;
-    this.damageFlashTimer = 0;
-    this.eventText = null;
-    this.eventTimer = 0;
-    this.icebergWarning = null;
-    this.spawnAccumDist = 0;
-    this.userAdjustedCameraInSink = false;
-    this.autoFocusedSinkLifeboats = false;
-    this.hasBrokenInTwo = false;
-    this.autoFocusedBreakup = false;
-
-    this.harborChapterIndex = 0;
-    this.harborProgress = 0;
-    this.harborAutoPlay = true;
-    this.userOverrodeHarborCam = false;
-    this.timeSkipProgress = 0;
-    this.harbor.root.visible = true;
-    this.applyAtmosphere(0);
-
-    this.resetShipRigPose();
-    this.ship.setWheelhouseFloodLevel(0);
-    this.applyHarborChapterCamera(0, true);
-
-    this.sound.playSteamWhistle();
-    this.sound.playTelegraphBell();
-    this.emitTelemetry();
-  }
-
   private resetShipRigPose(): void {
     this.ship.hullMeshGroup.visible = true;
     this.ship.hullMeshGroup.position.set(0, 0, 0);
@@ -403,95 +551,124 @@ export class TitanicEngine {
     this.rescueCompleteWhistlePlayed = false;
     this.survivorsRescued = 0;
     this.boatsRecovered = 0;
+    this.warshipRescuing = false;
+    this.warshipRescueProgress = 0;
+    this.warshipRescueWhistlePlayed = false;
+    this.warshipSurvivors = 0;
+    this.warshipBoatsRecovered = 0;
     this.focusCarpathia = false;
+    this.aftermathFocus = 'lifeboats';
     this.flareCooldown = 4.0;
     this.rescueDawnMix = 0;
     this.wheelhouseFloodLevel = 0;
+    this.carpathiaAvoidX = 0;
+    this.carpathiaAvoidZ = 0;
+    this.carpathiaSteerYaw = 0;
+    this.resetNavalCombat();
   }
 
-  public setHarborChapter(idx: number): void {
-    if (this.phase !== 'harbor') return;
-    const clamped = Math.max(0, Math.min(HARBOR_CHAPTERS.length - 1, idx));
-    this.harborChapterIndex = clamped;
-    this.harborProgress = HARBOR_CHAPTERS[clamped].startProgress + 0.01;
-    this.userOverrodeHarborCam = false;
-    this.applyHarborChapterCamera(clamped, false);
-    this.sound.playTelegraphBell();
-    this.emitTelemetry();
+  private resetNavalCombat(): void {
+    this.submarineCruiseTriggered = false;
+    this.submarineAftermathTriggered = false;
+    this.cruiseSubTimer = 0;
+    this.submarinesSunk = 0;
+    this.warship1FireFlash = 0;
+    this.warship1FireCooldown = 1.4;
+    this.warship1Engaged = false;
+    this.warship2FireFlash = 0;
+    this.warship2FireCooldown = 2.4;
+    this.warship2Engaged = false;
+
+    for (const sub of this.submarines) {
+      sub.state = 'hidden';
+      sub.rig.root.visible = false;
+      sub.diveY = -12;
+      sub.damagePitch = 0;
+      sub.damageRoll = 0;
+      sub.hp = sub.maxHp;
+      sub.gunYaw = 0;
+      sub.gunFireFlash = 0;
+      sub.hitFireIntensity = 0;
+      sub.sinkElapsed = 0;
+      sub.wakeAccum = 0;
+    }
+
+    for (let i = 0; i < MAX_NAVAL_PROJECTILES; i++) {
+      this.projectiles[i].active = false;
+      _projDummy.position.set(0, -50, 0);
+      _projDummy.scale.setScalar(0.001);
+      _projDummy.updateMatrix();
+      this.projectileMesh.setMatrixAt(i, _projDummy.matrix);
+    }
+    this.projectileMesh.instanceMatrix.needsUpdate = true;
   }
 
-  public nextHarborChapter(): void {
-    if (this.phase !== 'harbor') return;
-    if (this.harborChapterIndex >= HARBOR_CHAPTERS.length - 1) {
-      this.skipHarborToNight();
+  private resetWarshipPose(inNightWatch: boolean): void {
+    if (inNightWatch) {
+      this.warshipX = -46;
+      this.warshipZ = -2100 + 306; // 111m astern port quarter in the foaming wake
+      this.warshipHeadingRad = 0;
+      this.warshipYawRate = 0;
+      this.warshipSpeedKnots = 18;
+      this.warshipRoll = 0;
+      this.warshipHasJoinedWake = true;
+
+      this.warship2X = 68;
+      this.warship2Z = -2100 + 255; // Starboard flank escort astern
+      this.warship2HeadingRad = 0;
+      this.warship2YawRate = 0;
+      this.warship2SpeedKnots = 18;
+      this.warship2Roll = 0;
+      this.warship2HasJoinedWake = true;
     } else {
-      this.setHarborChapter(this.harborChapterIndex + 1);
+      this.warshipX = -86;
+      this.warshipZ = -265;
+      this.warshipHeadingRad = 0.04;
+      this.warshipYawRate = 0;
+      this.warshipSpeedKnots = 0;
+      this.warshipRoll = 0;
+      this.warshipHasJoinedWake = false;
+
+      this.warship2X = 92;
+      this.warship2Z = -280;
+      this.warship2HeadingRad = -0.04;
+      this.warship2YawRate = 0;
+      this.warship2SpeedKnots = 0;
+      this.warship2Roll = 0;
+      this.warship2HasJoinedWake = false;
     }
+    this.warshipSmokeAccum = 0;
+    this.warshipSprayAccum = 0;
+    this.warship2SmokeAccum = 0;
+    this.warship2SprayAccum = 0;
+
+    this.warship.root.position.set(this.warshipX, 0, this.warshipZ);
+    this.warship.root.rotation.set(0, -this.warshipHeadingRad, 0);
+    this.warship.setNavalState(0, this.warshipSpeedKnots, inNightWatch ? 1 : 0, false, undefined, undefined, {
+      laddersDeployed: false,
+      boardedRatio: 0,
+    });
+
+    this.warship2.root.position.set(this.warship2X, 0, this.warship2Z);
+    this.warship2.root.rotation.set(0, -this.warship2HeadingRad, 0);
+    this.warship2.setNavalState(0, this.warship2SpeedKnots, inNightWatch ? 1 : 0, false, undefined, undefined, {
+      laddersDeployed: false,
+      boardedRatio: 0,
+    });
   }
 
-  public prevHarborChapter(): void {
-    if (this.phase !== 'harbor') return;
-    this.setHarborChapter(Math.max(0, this.harborChapterIndex - 1));
-  }
-
-  public toggleHarborAutoPlay(): void {
-    if (this.phase !== 'harbor') return;
-    this.harborAutoPlay = !this.harborAutoPlay;
-    this.emitTelemetry();
-  }
-
-  public skipHarborToNight(): void {
+  private beginVoyageCommon(startInNightIceAlley: boolean): void {
     this.sound.unlock();
-    if (this.phase !== 'harbor') return;
-    // Place ship cleanly beyond the harbor breakwater mouth and begin the 4-day sunset-to-night time-lapse
-    this.harborProgress = 1.0;
-    this.shipZ = Math.min(this.shipZ, -585);
-    this.beginTimeSkip();
-  }
-
-  private beginTimeSkip(): void {
-    this.phase = 'timeskip';
-    this.timeSkipProgress = 0;
-    this.telegraphIndex = 4; // FULL AHEAD
-    this.userOverrodeHarborCam = false;
-    this.sound.playTelegraphBell();
-    this.emitTelemetry();
-  }
-
-  private applyHarborChapterCamera(idx: number, snapImmediate: boolean): void {
-    const ch = HARBOR_CHAPTERS[idx];
-    const spotIdx = VESSEL_SPOTS.findIndex((s) => s.id === ch.focusSpotId);
-    if (spotIdx !== -1) {
-      this.focusSpotIndex = spotIdx;
-    }
-    this.targetOrbitYaw = ch.orbitYaw;
-    this.targetOrbitPitch = ch.orbitPitch;
-    this.targetOrbitDistance = ch.orbitDistance;
-    this.cameraMode = ch.focusSpotId === 'wheelhouse' ? 'wheelhouse' : 'bridgeWing';
-
-    if (snapImmediate && spotIdx !== -1) {
-      const spec = VESSEL_SPOTS[spotIdx];
-      this.camFocusLocal.set(spec.localTarget[0], spec.localTarget[1], spec.localTarget[2]);
-      this.orbitYaw = ch.orbitYaw;
-      this.orbitPitch = ch.orbitPitch;
-      this.orbitDistance = ch.orbitDistance;
-    }
-  }
-
-  public startGame(): void {
-    this.sound.unlock();
+    this.clearIcebergs();
+    this.obstacleCooldowns.clear();
     this.phase = 'playing';
     this.endlessMode = false;
-    this.shipX = 0;
-    this.shipZ = 0;
     this.headingRad = 0;
     this.yawRate = 0;
     this.rudderDeg = 0;
     this.manualRudderTarget = null;
     this.wheelVisualAngle = 0;
     this.rollAngle = 0;
-    this.telegraphIndex = 4; // FULL AHEAD
-    this.speedKnots = 18;
     this.distanceNm = 0;
     this.hullIntegrity = 100;
     this.floodingPct = 0;
@@ -512,26 +689,71 @@ export class TitanicEngine {
     this.hitstopTimer = 0;
     this.shakeIntensity = 0;
     this.damageFlashTimer = 0;
-    this.eventText = 'ALL AHEAD FULL — ICE WATCH';
-    this.eventTimer = 2.8;
     this.icebergWarning = null;
     this.spawnAccumDist = 0;
     this.userAdjustedCameraInSink = false;
     this.autoFocusedSinkLifeboats = false;
     this.hasBrokenInTwo = false;
     this.autoFocusedBreakup = false;
-
-    this.harbor.root.visible = false;
-    this.applyAtmosphere(1.0);
+    this.bridgeOrderTimer = 0;
+    this.closestHazardSide = 0;
+    this.autopilotEnabled = false;
+    this.autopilotTargetRudder = 0;
+    this.autopilotSpeedCooldown = 0;
+    this.bowPanicActive = false;
+    this.panicShoutCooldown = 0;
 
     this.resetShipRigPose();
-    this.ship.setPowerLevel(1);
+    this.harbor.resetEscorts();
+
+    if (startInNightIceAlley) {
+      this.shipX = 0;
+      this.shipZ = -2100;
+      this.telegraphIndex = 4; // FULL AHEAD
+      this.speedKnots = 18;
+      this.harbor.root.visible = false;
+      this.applyAtmosphere(1.0);
+      this.ship.setPowerLevel(1);
+      this.seedInitialIcebergs();
+      this.resetWarshipPose(true);
+      this.eventText = 'APRIL 14 NIGHT WATCH — ALL AHEAD FULL';
+    } else {
+      // Dock-Start Direct Control right at Southampton Berth 44
+      this.shipX = 0;
+      this.shipZ = 0;
+      this.telegraphIndex = 1; // ALL STOP — player sets speed & steers from dock
+      this.speedKnots = 0;
+      this.harbor.root.visible = true;
+      this.applyAtmosphere(0);
+      this.resetWarshipPose(false);
+      this.harbor.update(
+        this.simTime,
+        this.shipX,
+        this.shipZ,
+        this.headingRad,
+        this.speedKnots,
+        this.floodingPct,
+        0,
+        0,
+        false,
+      );
+      this.eventText = 'BERTH 44 — PRESS W FOR ENGINE ORDER · ← / → RUDDER';
+      this.sound.playSteamWhistle();
+    }
+
+    this.eventTimer = 3.6;
     this.ship.setWheelhouseFloodLevel(0);
     this.focusVesselSpot('wheelhouse', false);
-
-    this.seedInitialIcebergs();
     this.sound.playTelegraphBell();
     this.emitTelemetry();
+  }
+
+  public startGame(): void {
+    this.beginVoyageCommon(false);
+  }
+
+  public startNightVoyage(): void {
+    this.beginVoyageCommon(true);
   }
 
   public togglePause(): void {
@@ -593,23 +815,42 @@ export class TitanicEngine {
   public fastForwardRescueWait(): void {
     if (this.phase === 'aftermath' && this.carpathiaStage === 'waiting') {
       this.aftermathSeconds = Math.max(this.aftermathSeconds, 58.0);
+      this.warshipRescuing = true;
+      this.warshipRescueProgress = Math.max(this.warshipRescueProgress, 1.0);
       this.emitTelemetry();
     }
   }
 
-  public focusOnCarpathia(enable: boolean): void {
+  public focusAftermathTarget(target: AftermathFocusTarget): void {
     if (this.phase !== 'aftermath' && this.phase !== 'gameover') return;
-    this.focusCarpathia = enable && this.carpathia.root.visible;
-    if (this.focusCarpathia) {
+    if (target === 'carpathia' && !this.carpathia.root.visible) {
+      this.aftermathFocus = 'lifeboats';
+    } else {
+      this.aftermathFocus = target;
+    }
+    this.focusCarpathia = this.aftermathFocus === 'carpathia';
+    if (this.aftermathFocus === 'carpathia') {
       this.targetOrbitYaw = 0.85;
       this.targetOrbitPitch = 0.16;
       this.targetOrbitDistance = 122;
+    } else if (this.aftermathFocus === 'warship') {
+      this.targetOrbitYaw = 0.68;
+      this.targetOrbitPitch = 0.17;
+      this.targetOrbitDistance = 104;
+    } else if (this.aftermathFocus === 'submarines') {
+      this.targetOrbitYaw = 0.62;
+      this.targetOrbitPitch = 0.18;
+      this.targetOrbitDistance = 72;
     } else {
       this.targetOrbitYaw = 0.72;
       this.targetOrbitPitch = 0.22;
       this.targetOrbitDistance = 135;
     }
     this.emitTelemetry();
+  }
+
+  public focusOnCarpathia(enable: boolean): void {
+    this.focusAftermathTarget(enable ? 'carpathia' : 'lifeboats');
   }
 
   private enterAftermath(): void {
@@ -622,13 +863,19 @@ export class TitanicEngine {
     this.rescueCompleteWhistlePlayed = false;
     this.survivorsRescued = 0;
     this.boatsRecovered = 0;
+    this.warshipRescuing = false;
+    this.warshipRescueProgress = 0;
+    this.warshipRescueWhistlePlayed = false;
+    this.warshipSurvivors = 0;
+    this.warshipBoatsRecovered = 0;
     this.focusCarpathia = false;
+    this.aftermathFocus = 'lifeboats';
     this.flareCooldown = 3.5;
     this.carpathia.root.visible = false;
     if (VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse') {
       this.focusVesselSpot('funnels', false);
     }
-    this.eventText = 'RMS TITANIC SUBMERGED — SIGNALING FOR RESCUE';
+    this.eventText = 'RMS TITANIC SUBMERGED — ESCORT WARSHIP CLOSING TO RESCUE';
     this.eventTimer = 5.5;
     this.saveBestScore();
     this.emitTelemetry();
@@ -638,6 +885,7 @@ export class TitanicEngine {
     this.phase = 'title';
     this.heldKeys.clear();
     this.clearIcebergs();
+    this.obstacleCooldowns.clear();
     this.shipX = 0;
     this.shipZ = 0;
     this.headingRad = 0;
@@ -656,11 +904,36 @@ export class TitanicEngine {
     this.autoFocusedSinkLifeboats = false;
     this.hasBrokenInTwo = false;
     this.autoFocusedBreakup = false;
+    this.focusSpotIndex = 0;
+    this.autopilotEnabled = false;
+    this.autopilotTargetRudder = 0;
+    this.autopilotSpeedCooldown = 0;
+    this.bowPanicActive = false;
+    this.panicShoutCooldown = 0;
     this.harbor.root.visible = true;
+    this.harbor.resetEscorts();
     this.applyAtmosphere(0);
     this.resetShipRigPose();
+    this.resetWarshipPose(false);
     this.ship.setWheelhouseFloodLevel(0);
     this.focusVesselSpot('wheelhouse', false);
+    this.emitTelemetry();
+  }
+
+  public toggleAutopilot(): void {
+    this.sound.unlock();
+    if (this.phase !== 'playing') return;
+    this.autopilotEnabled = !this.autopilotEnabled;
+    this.manualRudderTarget = null;
+    this.autopilotSpeedCooldown = 0;
+    this.sound.playAutopilotChime(this.autopilotEnabled);
+    if (this.autopilotEnabled) {
+      this.bridgeOrderTimer = 1.6;
+      this.eventText = 'AUTOPILOT ENGAGED — WHEELHOUSE CREW AT THE HELM';
+    } else {
+      this.eventText = 'AUTOPILOT DISENGAGED — MANUAL HELM CONTROL';
+    }
+    this.eventTimer = 2.6;
     this.emitTelemetry();
   }
 
@@ -669,6 +942,7 @@ export class TitanicEngine {
     const clamped = Math.max(0, Math.min(TELEGRAPH_NOTCHES.length - 1, idx));
     if (clamped !== this.telegraphIndex) {
       this.telegraphIndex = clamped;
+      this.bridgeOrderTimer = 1.85;
       this.sound.playTelegraphBell();
       this.eventText = TELEGRAPH_NOTCHES[clamped].label;
       this.eventTimer = 1.6;
@@ -701,6 +975,7 @@ export class TitanicEngine {
     if (idx === -1) return;
     this.focusSpotIndex = idx;
     const spec = VESSEL_SPOTS[idx];
+    this.interiorWalkOffset.set(0, 0, 0);
     this.targetOrbitYaw = spec.defaultOrbitYaw;
     this.targetOrbitPitch = spec.defaultOrbitPitch;
     this.targetOrbitDistance = spec.defaultDistance;
@@ -709,11 +984,8 @@ export class TitanicEngine {
     if (this.phase === 'sinking' && announce) {
       this.userAdjustedCameraInSink = true;
     }
-    if (this.phase === 'harbor' && announce) {
-      this.userOverrodeHarborCam = true;
-    }
     if (announce && this.phase === 'playing') {
-      this.eventText = `VIEW: ${spec.label.toUpperCase()}`;
+      this.eventText = `${spec.category === 'interior' ? 'INTERIOR' : 'STATION'}: ${spec.label.toUpperCase()}`;
       this.eventTimer = 1.8;
     }
     this.emitTelemetry();
@@ -760,29 +1032,8 @@ export class TitanicEngine {
     if (this.phase === 'title') {
       if (code === 'Enter' || code === 'Space') {
         e.preventDefault();
-        this.startHarborIntro();
+        this.startGame();
       }
-      return;
-    }
-
-    if (this.phase === 'harbor') {
-      if (code === 'ArrowRight' || code === 'KeyN') {
-        e.preventDefault();
-        this.nextHarborChapter();
-      } else if (code === 'ArrowLeft' || code === 'KeyB') {
-        e.preventDefault();
-        this.prevHarborChapter();
-      } else if (code === 'KeyS') {
-        e.preventDefault();
-        this.cycleFocusSpot();
-      } else if (code === 'Enter' || code === 'Space') {
-        e.preventDefault();
-        this.skipHarborToNight();
-      }
-      return;
-    }
-
-    if (this.phase === 'timeskip') {
       return;
     }
 
@@ -822,6 +1073,9 @@ export class TitanicEngine {
     } else if (code === 'KeyX' || code === 'ArrowDown') {
       e.preventDefault();
       this.stepTelegraph(-1);
+    } else if (code === 'KeyA') {
+      e.preventDefault();
+      this.toggleAutopilot();
     } else if (code === 'KeyS') {
       e.preventDefault();
       this.cycleFocusSpot();
@@ -843,7 +1097,7 @@ export class TitanicEngine {
   };
 
   private readonly handlePointerDown = (e: PointerEvent) => {
-    if (this.phase === 'title' || this.phase === 'paused' || this.phase === 'timeskip') return;
+    if (this.phase === 'title' || this.phase === 'paused') return;
     this.sound.unlock();
     this.isPointerDown = true;
     this.lastPointerX = e.clientX;
@@ -851,7 +1105,7 @@ export class TitanicEngine {
   };
 
   private readonly handlePointerMove = (e: PointerEvent) => {
-    if (!this.isPointerDown || this.phase === 'title' || this.phase === 'paused' || this.phase === 'timeskip') return;
+    if (!this.isPointerDown || this.phase === 'title' || this.phase === 'paused') return;
     const dx = e.clientX - this.lastPointerX;
     const dy = e.clientY - this.lastPointerY;
     this.lastPointerX = e.clientX;
@@ -864,8 +1118,6 @@ export class TitanicEngine {
     );
     if (this.phase === 'sinking') {
       this.userAdjustedCameraInSink = true;
-    } else if (this.phase === 'harbor') {
-      this.userOverrodeHarborCam = true;
     }
   };
 
@@ -874,9 +1126,9 @@ export class TitanicEngine {
   };
 
   private readonly handleWheel = (e: WheelEvent) => {
-    if (this.phase === 'title' || this.phase === 'paused' || this.phase === 'timeskip') return;
+    if (this.phase === 'title' || this.phase === 'paused') return;
     e.preventDefault();
-    const minDist = VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse' ? 0 : 6;
+    const minDist = VESSEL_SPOTS[this.focusSpotIndex].minDistance;
     const step = e.deltaY * 0.045;
     this.targetOrbitDistance = THREE.MathUtils.clamp(
       this.targetOrbitDistance + step,
@@ -885,8 +1137,6 @@ export class TitanicEngine {
     );
     if (this.phase === 'sinking') {
       this.userAdjustedCameraInSink = true;
-    } else if (this.phase === 'harbor') {
-      this.userOverrodeHarborCam = true;
     }
   };
 
@@ -993,6 +1243,10 @@ export class TitanicEngine {
       if (this.eventTimer <= 0) this.eventText = null;
     }
 
+    if (this.bridgeOrderTimer > 0) {
+      this.bridgeOrderTimer = Math.max(0, this.bridgeOrderTimer - dt);
+    }
+
     if (this.phase === 'title') {
       // Sunlit Southampton Harbor moored beauty pan on Title Screen
       this.applyAtmosphere(0);
@@ -1000,24 +1254,31 @@ export class TitanicEngine {
       this.wheelVisualAngle = THREE.MathUtils.damp(this.wheelVisualAngle, -this.rudderDeg * 0.11, 5, dt);
       this.ship.helmWheel.rotation.z = this.wheelVisualAngle;
       this.updateShipVisualRig(dt, 0);
-      this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0);
-      this.harbor.update(this.simTime, this.shipZ, 0);
+      this.populateCruiseAwareness(true);
+      this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0, this.ship.root, this.cruiseAwareness);
+      this.harbor.update(this.simTime, this.shipX, this.shipZ, this.headingRad, 0, 0, 0, dt, false);
+      this.stepWarshipConsciousness(dt, 0, false);
       this.emitBowSpray(dt, 0, -1, true);
-      this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, 0, 0);
+      this.oceanAndSky.update(
+        this.simTime,
+        this.shipX,
+        this.shipZ,
+        0,
+        0,
+        0,
+        this.warshipX,
+        this.warshipZ,
+        this.warshipHeadingRad,
+        this.warshipSpeedKnots,
+        this.warship2X,
+        this.warship2Z,
+        this.warship2HeadingRad,
+        this.warship2SpeedKnots,
+      );
       this.particles.update(dt);
       this.updateTitleCamera();
       this.syncUnderwaterCameraEffects(0, dt);
       this.sound.updateShipAmbience(2, false);
-      return;
-    }
-
-    if (this.phase === 'harbor') {
-      this.stepHarborSequence(dt);
-      return;
-    }
-
-    if (this.phase === 'timeskip') {
-      this.stepTimeSkipSequence(dt);
       return;
     }
 
@@ -1037,12 +1298,36 @@ export class TitanicEngine {
       this.shipX += this.speedKnots * 1.5 * dt * Math.sin(this.headingRad);
       this.updateShipVisualRig(dt, this.speedKnots);
       if (this.phase === 'victory') {
-        this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, this.floodingPct);
+        this.populateCruiseAwareness(false);
+        this.ship.crewAndLifeboats.updateCruising(
+          this.simTime,
+          dt,
+          this.floodingPct,
+          this.ship.root,
+          this.cruiseAwareness,
+        );
       } else {
         this.advanceRescueSimulation(dt);
+        this.stepNavalCombat(dt, 1.0, 'carpathia');
       }
+      this.stepWarshipConsciousness(dt, 1.0, this.phase === 'gameover');
       this.applyAtmosphere(1.0, this.phase === 'gameover' ? this.rescueDawnMix : 0);
-      this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
+      this.oceanAndSky.update(
+        this.simTime,
+        this.shipX,
+        this.shipZ,
+        this.headingRad,
+        this.speedKnots,
+        1.0,
+        this.warshipX,
+        this.warshipZ,
+        this.warshipHeadingRad,
+        this.warshipSpeedKnots,
+        this.warship2X,
+        this.warship2Z,
+        this.warship2HeadingRad,
+        this.warship2SpeedKnots,
+      );
       this.particles.update(dt);
       this.updateCamera(dt);
       this.syncUnderwaterCameraEffects(1.0, dt);
@@ -1051,23 +1336,37 @@ export class TitanicEngine {
     }
 
     // =======================================================================
-    // ACTIVE GAMEPLAY SIMULATION
+    // ACTIVE GAMEPLAY SIMULATION (Direct Control / Autopilot -> Channel -> Night)
     // =======================================================================
-    const steerLeft = this.heldKeys.has('KeyA') || this.heldKeys.has('ArrowLeft');
-    const steerRight = this.heldKeys.has('KeyD') || this.heldKeys.has('ArrowRight');
-
     const prevRudder = this.rudderDeg;
-    if (steerLeft && !steerRight) {
-      this.manualRudderTarget = null;
-      this.rudderDeg = Math.max(-35, this.rudderDeg - 52 * dt);
-    } else if (steerRight && !steerLeft) {
-      this.manualRudderTarget = null;
-      this.rudderDeg = Math.min(35, this.rudderDeg + 52 * dt);
-    } else if (this.manualRudderTarget !== null) {
-      this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, this.manualRudderTarget, 7, dt);
+    if (this.autopilotEnabled) {
+      this.computeAutopilotCommand(dt);
+      this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, this.autopilotTargetRudder, 5.2, dt);
     } else {
-      // Gently relax rudder back toward amidships when keys released
-      this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, 0, 1.8, dt);
+      const steerLeft = this.heldKeys.has('ArrowLeft') || this.heldKeys.has('KeyQ');
+      const steerRight =
+        this.heldKeys.has('ArrowRight') || this.heldKeys.has('KeyE') || this.heldKeys.has('KeyD');
+
+      if (steerLeft && !steerRight) {
+        this.manualRudderTarget = null;
+        this.rudderDeg = Math.max(-35, this.rudderDeg - 52 * dt);
+      } else if (steerRight && !steerLeft) {
+        this.manualRudderTarget = null;
+        this.rudderDeg = Math.min(35, this.rudderDeg + 52 * dt);
+      } else if (this.manualRudderTarget !== null) {
+        this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, this.manualRudderTarget, 7, dt);
+      } else {
+        // Gently relax rudder back toward amidships when keys released
+        this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, 0, 1.8, dt);
+      }
+    }
+
+    if (this.bowPanicActive) {
+      this.panicShoutCooldown -= dt;
+      if (this.panicShoutCooldown <= 0) {
+        this.panicShoutCooldown = 2.6 + Math.random() * 2.2;
+        this.sound.playPanicShoutBurst();
+      }
     }
 
     // Subtle mechanical helm spoke sound when steering actively
@@ -1079,12 +1378,15 @@ export class TitanicEngine {
       }
     }
 
+    // I / J / K / L Smooth Interior & Deck Walking
+    this.stepInteriorWalk(dt);
+
     // Telegraph speed interpolation (massive liner inertia)
     const targetKnots = TELEGRAPH_NOTCHES[this.telegraphIndex].targetKnots;
     const accelRate = targetKnots < this.speedKnots ? 0.75 : 0.48;
     this.speedKnots = THREE.MathUtils.damp(this.speedKnots, targetKnots, accelRate, dt);
 
-    // Rudder authority scales with speed (with a minimum low-speed authority so player never stalls)
+    // Rudder authority scales with speed (with a low-speed tug/thruster nudge so dock maneuvering works cleanly)
     const speedAuthority = 0.36 + 0.64 * Math.min(1, Math.abs(this.speedKnots) / 20);
     const reverseSign = this.speedKnots < -1 ? -0.65 : 1;
     const targetYawRate = (this.rudderDeg / 35) * 0.36 * speedAuthority * reverseSign;
@@ -1106,6 +1408,23 @@ export class TitanicEngine {
       this.score += nmDelta * (120 + this.speedKnots * 6);
     }
 
+    // Smoothly transition atmosphere from Southampton Daylight (shipZ >= -540) to April 14 Night (-1450+)
+    const seaMix = THREE.MathUtils.smoothstep(-this.shipZ, 540, 1450);
+    this.harbor.root.visible = Math.hypot(this.shipX, this.shipZ) < 1750;
+    if (this.harbor.root.visible) {
+      this.harbor.update(
+        this.simTime,
+        this.shipX,
+        this.shipZ,
+        this.headingRad,
+        this.speedKnots,
+        this.floodingPct,
+        seaMix,
+        dt,
+        true,
+      );
+    }
+
     // Searchlight sweep timers
     if (this.searchlightTimer > 0) {
       this.searchlightTimer -= dt;
@@ -1117,10 +1436,10 @@ export class TitanicEngine {
       this.searchlightCooldown = Math.max(0, this.searchlightCooldown - dt);
     }
 
-    // Progressive water ingress when forward compartments are breached
+    // Progressive water ingress when compartments are breached
     if (this.hullIntegrity <= 78) {
       const damageSeverity = (80 - this.hullIntegrity) / 80; // 0.025 -> 1.0
-      this.waterIngressRate = 0.65 + damageSeverity * damageSeverity * 5.2;
+      this.waterIngressRate = 1.0 + damageSeverity * damageSeverity * 5.6;
       this.floodingPct = Math.min(100, this.floodingPct + this.waterIngressRate * dt);
     } else {
       this.waterIngressRate = 0;
@@ -1134,20 +1453,53 @@ export class TitanicEngine {
 
     // Update Ship Transforms, Crew, Wheel, Telegraph, Bow Spray & Light Rig
     this.updateShipVisualRig(dt, this.speedKnots);
-    this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, this.floodingPct);
+    this.populateCruiseAwareness(seaMix < 0.45);
+    this.ship.crewAndLifeboats.updateCruising(
+      this.simTime,
+      dt,
+      this.floodingPct,
+      this.ship.root,
+      this.cruiseAwareness,
+    );
+    this.stepNavalCombat(dt, seaMix, 'titanic');
+    this.stepWarshipConsciousness(dt, seaMix, false);
     this.emitBowSpray(dt, fwdX, fwdZ);
-    this.applyAtmosphere(1.0);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
+    this.applyAtmosphere(seaMix);
+    this.oceanAndSky.update(
+      this.simTime,
+      this.shipX,
+      this.shipZ,
+      this.headingRad,
+      this.speedKnots,
+      seaMix,
+      this.warshipX,
+      this.warshipZ,
+      this.warshipHeadingRad,
+      this.warshipSpeedKnots,
+      this.warship2X,
+      this.warship2Z,
+      this.warship2HeadingRad,
+      this.warship2SpeedKnots,
+    );
 
-    // Iceberg Spawning, Motion, Warnings, Near-Miss & Collision
-    this.manageIcebergField(dt, worldSpeed, fwdX, fwdZ);
-    this.checkIcebergInteractions(dt, fwdX, fwdZ);
+    // Seed Ice Alley once approaching open night water & spawn icebergs dynamically
+    if (seaMix > 0.72) {
+      if (!this.initialIceSeeded && this.icebergs.length === 0) {
+        this.seedInitialIcebergs();
+        this.eventText = 'ENTERING ICE ALLEY — KEEP SHARP LOOKOUT';
+        this.eventTimer = 3.2;
+      }
+      this.manageIcebergField(dt, worldSpeed, fwdX, fwdZ);
+    }
+
+    // Check Collisions with ALL Objects (Tugs, Pilot Vessel, Lifeboats, Quay, Breakwater, Buoys, Warships, Submarines, Icebergs)
+    this.checkAllObstacles(dt, fwdX, fwdZ);
 
     this.particles.update(dt);
     this.shakeIntensity = Math.max(0, this.shakeIntensity - dt * 1.9);
 
     this.updateCamera(dt);
-    this.syncUnderwaterCameraEffects(1.0, dt);
+    this.syncUnderwaterCameraEffects(seaMix, dt);
     this.sound.updateShipAmbience(this.speedKnots, true);
 
     // Check Sinking Trigger (Hull Breached OR Water Overwhelms Bulkheads)
@@ -1171,6 +1523,207 @@ export class TitanicEngine {
     if (this.telemetryAccum >= 0.08) {
       this.telemetryAccum = 0;
       this.emitTelemetry();
+    }
+  }
+
+  private populateCruiseAwareness(harborNear: boolean): void {
+    this.cruiseAwareness.shipRoll = this.rollAngle;
+    this.cruiseAwareness.shipPitch = this.ship.bowGroup.rotation.x;
+    this.cruiseAwareness.harborNear = harborNear;
+    this.cruiseAwareness.hazardSide = this.closestHazardSide;
+    this.cruiseAwareness.bridgeOrderActive = this.bridgeOrderTimer > 0;
+    this.cruiseAwareness.autopilotActive = this.autopilotEnabled && this.phase === 'playing';
+    this.cruiseAwareness.rudderDeg = this.rudderDeg;
+    this.cruiseAwareness.bowPanicActive = this.bowPanicActive && this.phase === 'playing';
+    if (this.orbitDistance < 12) {
+      this.cruiseAwareness.playerLocalX = this.camFocusLocal.x;
+      this.cruiseAwareness.playerLocalY = this.camFocusLocal.y;
+      this.cruiseAwareness.playerLocalZ = this.camFocusLocal.z;
+    } else {
+      this.cruiseAwareness.playerLocalX = undefined;
+      this.cruiseAwareness.playerLocalY = undefined;
+      this.cruiseAwareness.playerLocalZ = undefined;
+    }
+  }
+
+  private computeAutopilotCommand(dt: number): void {
+    // 10.5-second multi-arc trajectory lookahead over 15 rudder candidates (zero per-frame GC)
+    const horizonSteps = 14;
+    const stepDt = 0.75;
+    const rDamp = 1 - Math.exp(-5.2 * stepDt);
+    const yDamp = 1 - Math.exp(-2.4 * stepDt);
+
+    const effectiveKnots =
+      Math.abs(this.speedKnots) < 2.5 ? 10 : this.speedKnots;
+    const simSpeed = effectiveKnots * 2.15;
+    const speedAuthority = 0.36 + 0.64 * Math.min(1, Math.abs(effectiveKnots) / 20);
+    const reverseSign = effectiveKnots < -1 ? -0.65 : 1;
+
+    const circleObs = this.harbor.root.visible ? this.harbor.getCircleObstacles() : null;
+    const boxObs = this.harbor.root.visible ? this.harbor.getBoxObstacles() : null;
+
+    let bestDeg = 0;
+    let bestScore = -Infinity;
+    let bestMinClearance = 999;
+
+    const evalZones = [-72, -28, 45, 145];
+    const evalRadii = [5.4, 13.4, 14.2, 13.0];
+
+    for (let candDeg = -35; candDeg <= 35; candDeg += 5) {
+      let sx = this.shipX;
+      let sz = this.shipZ;
+      let sh = this.headingRad;
+      let syr = this.yawRate;
+      let sr = this.rudderDeg;
+
+      let minClear = 999;
+      let penalty = 0;
+
+      for (let step = 1; step <= horizonSteps; step++) {
+        const tSim = step * stepDt;
+        sr += (candDeg - sr) * rDamp;
+        const targetYr = (sr / 35) * 0.36 * speedAuthority * reverseSign;
+        syr += (targetYr - syr) * yDamp;
+        sh += syr * stepDt;
+
+        const fx = Math.sin(sh);
+        const fz = -Math.cos(sh);
+        sx += fx * simSpeed * stepDt;
+        sz += fz * simSpeed * stepDt;
+
+        // Check all drifting icebergs along predicted path
+        for (let bIdx = 0; bIdx < this.icebergs.length; bIdx++) {
+          const berg = this.icebergs[bIdx];
+          const bx = berg.x + berg.vx * tSim;
+          const bz = berg.z + berg.vz * tSim;
+          const req = berg.collisionRadius + 16.5;
+
+          for (let h = 0; h < 4; h++) {
+            const px = sx + fx * -evalZones[h];
+            const pz = sz + fz * -evalZones[h];
+            const dist = Math.hypot(px - bx, pz - bz);
+            const clear = dist - (berg.collisionRadius + evalRadii[h]);
+            if (clear < minClear) minClear = clear;
+            if (dist < req + evalRadii[h]) {
+              const deficit = req + evalRadii[h] - dist;
+              penalty += clear < 5 ? 90000 + deficit * 4500 : deficit * 260;
+            }
+          }
+        }
+
+        // Check Southampton Harbor obstacles & channel walls when harbor is active
+        if (circleObs && boxObs) {
+          for (let ci = 0; ci < circleObs.length; ci++) {
+            const obs = circleObs[ci];
+            const dist = Math.hypot(sx + fx * 42 - obs.x, sz + fz * 42 - obs.z);
+            const clear = dist - (obs.radius + 14.2);
+            if (clear < minClear) minClear = clear;
+            if (clear < 12) {
+              penalty += (12 - clear) * (clear < 2 ? 60000 : 280);
+            }
+          }
+          for (let bi = 0; bi < boxObs.length; bi++) {
+            const box = boxObs[bi];
+            for (let h = 0; h < 4; h++) {
+              const px = sx + fx * -evalZones[h];
+              const pz = sz + fz * -evalZones[h];
+              const cx = THREE.MathUtils.clamp(px, box.minX, box.maxX);
+              const cz = THREE.MathUtils.clamp(pz, box.minZ, box.maxZ);
+              const dist = Math.hypot(px - cx, pz - cz);
+              const clear = dist - evalRadii[h];
+              if (clear < minClear) minClear = clear;
+              if (clear < 8) {
+                penalty += (8 - clear) * (clear < 1.5 ? 75000 : 340);
+              }
+            }
+          }
+        }
+
+        // Check Royal Navy escort warships predicted hull positions & incoming torpedoes
+        const wSimSpd = this.warshipSpeedKnots * 2.15;
+        const wxPred = this.warshipX + Math.sin(this.warshipHeadingRad) * wSimSpd * tSim;
+        const wzPred = this.warshipZ - Math.cos(this.warshipHeadingRad) * wSimSpd * tSim;
+        const w2SimSpd = this.warship2SpeedKnots * 2.15;
+        const w2xPred = this.warship2X + Math.sin(this.warship2HeadingRad) * w2SimSpd * tSim;
+        const w2zPred = this.warship2Z - Math.cos(this.warship2HeadingRad) * w2SimSpd * tSim;
+        for (let h = 0; h < 4; h++) {
+          const px = sx + fx * -evalZones[h];
+          const pz = sz + fz * -evalZones[h];
+          const dist1 = Math.hypot(px - wxPred, pz - wzPred);
+          const clear1 = dist1 - (16 + evalRadii[h]);
+          if (clear1 < minClear) minClear = clear1;
+          if (clear1 < 14) {
+            penalty += (14 - clear1) * (clear1 < 2 ? 70000 : 260);
+          }
+
+          const dist2 = Math.hypot(px - w2xPred, pz - w2zPred);
+          const clear2 = dist2 - (16 + evalRadii[h]);
+          if (clear2 < minClear) minClear = clear2;
+          if (clear2 < 14) {
+            penalty += (14 - clear2) * (clear2 < 2 ? 70000 : 260);
+          }
+        }
+
+        for (let pi = 0; pi < MAX_NAVAL_PROJECTILES; pi++) {
+          const proj = this.projectiles[pi];
+          if (!proj.active || proj.kind !== 'torpedo') continue;
+          const ptx = proj.x + proj.vx * tSim;
+          const ptz = proj.z + proj.vz * tSim;
+          for (let h = 0; h < 4; h++) {
+            const px = sx + fx * -evalZones[h];
+            const pz = sz + fz * -evalZones[h];
+            const dist = Math.hypot(px - ptx, pz - ptz);
+            const clear = dist - (6 + evalRadii[h]);
+            if (clear < minClear) minClear = clear;
+            if (clear < 12) {
+              penalty += (12 - clear) * (clear < 2 ? 55000 : 240);
+            }
+          }
+        }
+      }
+
+      // Keep northbound heading biased cleanly & avoid unnecessary helm oscillation
+      let normH = sh % (Math.PI * 2);
+      if (normH > Math.PI) normH -= Math.PI * 2;
+      if (normH < -Math.PI) normH += Math.PI * 2;
+
+      const channelBias = this.harbor.root.visible && this.shipZ > -560 ? Math.abs(sx) * 0.22 : 0;
+      const headingPenalty = Math.abs(normH) * 42;
+      const smoothnessPenalty = Math.abs(candDeg - this.autopilotTargetRudder) * 0.45;
+      const clearanceBonus = Math.min(60, minClear) * 1.8;
+
+      const score = clearanceBonus - penalty - headingPenalty - channelBias - smoothnessPenalty;
+      if (score > bestScore) {
+        bestScore = score;
+        bestDeg = candDeg;
+        bestMinClearance = minClear;
+      }
+    }
+
+    this.autopilotTargetRudder = bestDeg;
+
+    // Intelligent Wheelhouse Telegraph Management (slows for tight turns, cruises at Full Ahead when clear)
+    if (this.autopilotSpeedCooldown > 0) {
+      this.autopilotSpeedCooldown = Math.max(0, this.autopilotSpeedCooldown - dt);
+    } else {
+      let desiredNotch = this.nightMix < 0.35 ? 3 : 4; // HALF AHEAD in channel, FULL AHEAD at sea
+      if (bestMinClearance < 8) {
+        desiredNotch = 1; // ALL STOP to prevent impact if crowded
+      } else if (bestMinClearance < 18) {
+        desiredNotch = 2; // SLOW AHEAD for maximum turning tightness
+      } else if (bestMinClearance < 28) {
+        desiredNotch = 3; // HALF AHEAD
+      }
+      if (this.telegraphIndex <= 1 && bestMinClearance >= 14) {
+        desiredNotch = Math.max(desiredNotch, 3);
+      }
+
+      if (desiredNotch !== this.telegraphIndex) {
+        this.telegraphIndex = desiredNotch;
+        this.autopilotSpeedCooldown = 1.65;
+        this.bridgeOrderTimer = 1.6;
+        this.sound.playTelegraphBell();
+      }
     }
   }
 
@@ -1231,9 +1784,48 @@ export class TitanicEngine {
     }
   }
 
+  private stepInteriorWalk(dt: number): void {
+    const spec = VESSEL_SPOTS[this.focusSpotIndex];
+    if (!spec.walkBounds) return;
+
+    const walkFwd = (this.heldKeys.has('KeyI') ? 1 : 0) - (this.heldKeys.has('KeyK') ? 1 : 0);
+    const walkStrafe = (this.heldKeys.has('KeyL') ? 1 : 0) - (this.heldKeys.has('KeyJ') ? 1 : 0);
+    if (walkFwd === 0 && walkStrafe === 0) return;
+
+    // Walk relative to horizontal camera look direction in ship-local XZ plane
+    const lookLocalX = -Math.sin(this.orbitYaw);
+    const lookLocalZ = -Math.cos(this.orbitYaw);
+    const rightLocalX = Math.cos(this.orbitYaw);
+    const rightLocalZ = -Math.sin(this.orbitYaw);
+
+    const moveSpeed = 5.4;
+    let vx = lookLocalX * walkFwd + rightLocalX * walkStrafe;
+    let vz = lookLocalZ * walkFwd + rightLocalZ * walkStrafe;
+    const len = Math.hypot(vx, vz) || 1;
+    vx /= len;
+    vz /= len;
+
+    this.interiorWalkOffset.x += vx * moveSpeed * dt;
+    this.interiorWalkOffset.z += vz * moveSpeed * dt;
+
+    const minOffX = spec.walkBounds.minX - spec.localTarget[0];
+    const maxOffX = spec.walkBounds.maxX - spec.localTarget[0];
+    const minOffZ = spec.walkBounds.minZ - spec.localTarget[2];
+    const maxOffZ = spec.walkBounds.maxZ - spec.localTarget[2];
+    this.interiorWalkOffset.x = THREE.MathUtils.clamp(this.interiorWalkOffset.x, minOffX, maxOffX);
+    this.interiorWalkOffset.z = THREE.MathUtils.clamp(this.interiorWalkOffset.z, minOffZ, maxOffZ);
+  }
+
   private syncUnderwaterCameraEffects(nightMix: number, dt: number): void {
+    const spec = VESSEL_SPOTS[this.focusSpotIndex];
+    const insideDryCompartment =
+      this.phase !== 'sinking' &&
+      (spec.id === 'dining' || spec.id === 'engine' || spec.id === 'staircase') &&
+      this.orbitDistance < 12 &&
+      this.floodingPct < 80;
+
     const waveY = sampleOceanWaveHeight(this.camera.position.x, this.camera.position.z, this.simTime);
-    const depthBelowWave = waveY - this.camera.position.y;
+    const depthBelowWave = insideDryCompartment ? -1.0 : waveY - this.camera.position.y;
     const underwaterMix = THREE.MathUtils.clamp((depthBelowWave + 0.14) / 0.48, 0, 1);
 
     this.oceanAndSky.updateCameraView(this.camera.position, underwaterMix);
@@ -1284,117 +1876,11 @@ export class TitanicEngine {
     }
   }
 
-  private stepHarborSequence(dt: number): void {
-    this.applyAtmosphere(0);
-
-    if (this.harborAutoPlay) {
-      this.harborProgress = Math.min(1, this.harborProgress + dt / 36.0);
-    }
-
-    // Track current chapter based on progress
-    let chIdx = 0;
-    for (let i = 0; i < HARBOR_CHAPTERS.length; i++) {
-      if (this.harborProgress >= HARBOR_CHAPTERS[i].startProgress) {
-        chIdx = i;
-      }
-    }
-    if (chIdx !== this.harborChapterIndex) {
-      this.harborChapterIndex = chIdx;
-      if (!this.userOverrodeHarborCam) {
-        this.applyHarborChapterCamera(chIdx, false);
-      }
-      this.emitTelemetry();
-    }
-
-    // Smoothly sail Titanic from Berth 44 (z = 0) past channel buoys & breakwater mouth (z = -620)
-    const targetZ = -this.harborProgress * 620;
-    const prevZ = this.shipZ;
-    this.shipZ = THREE.MathUtils.damp(this.shipZ, targetZ, 2.2, dt);
-    const velUnits = Math.max(0, (prevZ - this.shipZ) / Math.max(dt, 0.001));
-    this.speedKnots = THREE.MathUtils.damp(this.speedKnots, Math.min(14, velUnits / 1.9), 3.0, dt);
-
-    // Subtle helm demonstration when showing Chapter 4 inside the Wheelhouse
-    if (this.harborChapterIndex === 3) {
-      this.rudderDeg = Math.sin(this.simTime * 1.1) * 14;
-      this.telegraphIndex = 3; // HALF AHEAD
-    } else {
-      this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, 0, 3, dt);
-      this.telegraphIndex = 2;
-    }
-
-    this.updateShipVisualRig(dt, this.speedKnots);
-    this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0);
-    this.harbor.update(this.simTime, this.shipZ, 0);
-    this.emitBowSpray(dt, 0, -1, true);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 0);
-    this.particles.update(dt);
-    this.updateCamera(dt);
-    this.syncUnderwaterCameraEffects(0, dt);
-    this.sound.updateShipAmbience(this.speedKnots, true);
-
-    if (this.harborProgress >= 1.0 && this.shipZ <= -560) {
-      this.beginTimeSkip();
-      return;
-    }
-
-    this.telemetryAccum += dt;
-    if (this.telemetryAccum >= 0.08) {
-      this.telemetryAccum = 0;
-      this.emitTelemetry();
-    }
-  }
-
-  private stepTimeSkipSequence(dt: number): void {
-    this.timeSkipProgress = Math.min(1, this.timeSkipProgress + dt / 4.4);
-    const p = this.timeSkipProgress;
-
-    // 4-day Atlantic crossing time-lapse: Noon -> Golden Sunset -> Starlit Arctic Night
-    const nightMix = THREE.MathUtils.smoothstep(p, 0.05, 0.92);
-    this.applyAtmosphere(nightMix);
-
-    // Surge ahead away from harbor mouth into open sea
-    this.speedKnots = THREE.MathUtils.lerp(13, 20, THREE.MathUtils.smoothstep(p, 0.0, 0.75));
-    const surgeSpeed = this.speedKnots * 4.2; // accelerated time-lapse visual wake
-    this.shipZ -= surgeSpeed * dt;
-
-    // Harbor fades out behind in the distance
-    this.harbor.root.visible = p < 0.48;
-    if (this.harbor.root.visible) {
-      this.harbor.update(this.simTime, this.shipZ, nightMix);
-    }
-
-    // Glide camera cleanly from exterior sea view back into the Wheelhouse Helm before player takes control
-    if (p > 0.36 && VESSEL_SPOTS[this.focusSpotIndex].id !== 'wheelhouse') {
-      this.focusVesselSpot('wheelhouse', false);
-    }
-
-    this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, 0, 4, dt);
-    this.updateShipVisualRig(dt, this.speedKnots);
-    this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, 0);
-    this.emitBowSpray(dt, 0, -1);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, 0, this.speedKnots, nightMix);
-    this.particles.update(dt);
-    this.updateCamera(dt);
-    this.syncUnderwaterCameraEffects(nightMix, dt);
-    this.sound.updateShipAmbience(this.speedKnots, true);
-
-    if (this.timeSkipProgress >= 1.0) {
-      // Transition cleanly into Ice Alley Night Watch at (0, 0)
-      this.startGame();
-      return;
-    }
-
-    this.telemetryAccum += dt;
-    if (this.telemetryAccum >= 0.05) {
-      this.telemetryAccum = 0;
-      this.emitTelemetry();
-    }
-  }
-
   private triggerSinking(): void {
     this.hullIntegrity = Math.max(0, this.hullIntegrity);
     this.floodingPct = 100;
     this.waterIngressRate = 0;
+    this.autopilotEnabled = false;
     this.phase = 'sinking';
     this.sinkProgress = 0;
     this.hasBrokenInTwo = false;
@@ -1577,8 +2063,25 @@ export class TitanicEngine {
       this.focusVesselSpot('funnels', false);
     }
 
+    this.stepNavalCombat(dt, 1.0, 'titanic');
+    this.stepWarshipConsciousness(dt, 1.0, true);
     this.applyAtmosphere(1.0);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
+    this.oceanAndSky.update(
+      this.simTime,
+      this.shipX,
+      this.shipZ,
+      this.headingRad,
+      this.speedKnots,
+      1.0,
+      this.warshipX,
+      this.warshipZ,
+      this.warshipHeadingRad,
+      this.warshipSpeedKnots,
+      this.warship2X,
+      this.warship2Z,
+      this.warship2HeadingRad,
+      this.warship2SpeedKnots,
+    );
     this.particles.update(dt);
     this.shakeIntensity = Math.max(0.06 * (1 - p), this.shakeIntensity - dt * 1.4);
     this.updateCamera(dt);
@@ -1634,16 +2137,36 @@ export class TitanicEngine {
     let laddersDeployed = false;
     let sweepLight = false;
 
+    // Royal Navy Escort Warship closes in to port side of lifeboats and carries out immediate rescue
+    const warshipStandX = this.shipX - rightX * 84 - fwdX * 16;
+    const warshipStandZ = this.shipZ - rightZ * 84 - fwdZ * 16;
+    const warshipDist = Math.hypot(warshipStandX - this.warshipX, warshipStandZ - this.warshipZ);
+    if (!this.warshipRescuing && t >= 10.0 && (warshipDist < 68 || t >= 16.0)) {
+      this.warshipRescuing = true;
+      if (!this.warshipRescueWhistlePlayed) {
+        this.warshipRescueWhistlePlayed = true;
+        this.sound.playCarpathiaWhistle();
+        this.eventText = 'ESCORT WARSHIP ON STATION — LOWERING BOARDING LADDERS';
+        this.eventTimer = 5.0;
+        if (this.aftermathFocus === 'lifeboats' && this.carpathiaStage === 'waiting') {
+          this.focusAftermathTarget('warship');
+        }
+      }
+    }
+    if (this.warshipRescuing) {
+      this.warshipRescueProgress = Math.min(1, this.warshipRescueProgress + dt / 36.0);
+    }
+
     if (t < WAIT_SEC) {
       this.carpathiaStage = 'waiting';
       this.carpathia.root.visible = false;
       this.carpathiaDistanceM = 460;
 
-      // Periodic distress flares fired from lifeboats every ~12s during the 1-minute night vigil
+      // Periodic distress flares fired from remaining waiting lifeboats during the 1-minute vigil
       this.flareCooldown -= dt;
       if (this.flareCooldown <= 0) {
         this.flareCooldown = 11.5;
-        const boat = this.ship.crewAndLifeboats.lifeboats[Math.floor(Math.random() * 16)];
+        const boat = this.ship.crewAndLifeboats.lifeboats[Math.floor(Math.random() * 8) * 2 + 1];
         boat.boatGroup.getWorldPosition(_vFocusWorld);
         this.emitRescueFlare(_vFocusWorld.x, _vFocusWorld.z, 0xd9f99d);
       }
@@ -1668,7 +2191,7 @@ export class TitanicEngine {
         const wx = this.shipX + rightX * carpLocalX + fwdX * -carpLocalZ;
         const wz = this.shipZ + rightZ * carpLocalX + fwdZ * -carpLocalZ;
         this.emitRescueFlare(wx, wz, 0x6ee7b7);
-        this.focusOnCarpathia(true);
+        this.focusAftermathTarget('carpathia');
       }
 
       // Gentle predawn sky lift as rescue liner arrives
@@ -1695,7 +2218,7 @@ export class TitanicEngine {
       if (this.carpathiaStage !== 'boarding') {
         this.carpathiaStage = 'boarding';
         this.sound.playCarpathiaWhistle();
-        this.eventText = 'CARPATHIA ALL STOP — LOWERING BOARDING LADDERS';
+        this.eventText = 'CARPATHIA ALL STOP — JOINT RESCUE BOARDING UNDERWAY';
         this.eventTimer = 5.0;
       }
       carpLocalX = 0;
@@ -1714,7 +2237,7 @@ export class TitanicEngine {
           this.rescueCompleteWhistlePlayed = true;
           this.sound.playCarpathiaWhistle();
         }
-        this.eventText = 'RESCUE COMPLETE — ALL 712 SURVIVORS ABOARD CARPATHIA';
+        this.eventText = 'RESCUE COMPLETE — ALL 712 SURVIVORS ABOARD WARSHIP & CARPATHIA';
         this.eventTimer = 7.0;
       }
       carpLocalX = 0;
@@ -1729,13 +2252,52 @@ export class TitanicEngine {
     }
 
     if (this.carpathia.root.visible) {
-      const carpWorldX = this.shipX + rightX * carpLocalX + fwdX * -carpLocalZ;
-      const carpWorldZ = this.shipZ + rightZ * carpLocalX + fwdZ * -carpLocalZ;
+      const baseWorldX = this.shipX + rightX * carpLocalX + fwdX * -carpLocalZ;
+      const baseWorldZ = this.shipZ + rightZ * carpLocalX + fwdZ * -carpLocalZ;
+
+      // Conscious iceberg avoidance steering during Carpathia's night approach
+      let targetAvoidX = 0;
+      let targetAvoidZ = 0;
+      if (this.carpathiaStage === 'approaching') {
+        const approachU = THREE.MathUtils.clamp((t - WAIT_SEC) / APPROACH_SEC, 0, 1);
+        const fadeOut = 1 - THREE.MathUtils.smoothstep(approachU, 0.72, 1.0);
+        if (fadeOut > 0.01) {
+          for (let i = 0; i < this.icebergs.length; i++) {
+            const b = this.icebergs[i];
+            const dx = baseWorldX + this.carpathiaAvoidX - b.x;
+            const dz = baseWorldZ + this.carpathiaAvoidZ - b.z;
+            const dist = Math.hypot(dx, dz);
+            const safeDist = b.collisionRadius + 36;
+            if (dist < safeDist && dist > 0.05) {
+              const push = ((safeDist - dist) / safeDist) * 32 * fadeOut;
+              targetAvoidX += (dx / dist) * push;
+              targetAvoidZ += (dz / dist) * push;
+            }
+          }
+        }
+      }
+
+      this.carpathiaAvoidX = THREE.MathUtils.damp(this.carpathiaAvoidX, targetAvoidX, 1.8, dt);
+      this.carpathiaAvoidZ = THREE.MathUtils.damp(this.carpathiaAvoidZ, targetAvoidZ, 1.8, dt);
+      const steerLateral = this.carpathiaAvoidX * rightX + this.carpathiaAvoidZ * rightZ;
+      this.carpathiaSteerYaw = THREE.MathUtils.damp(
+        this.carpathiaSteerYaw,
+        THREE.MathUtils.clamp(-steerLateral * 0.014, -0.32, 0.32),
+        2.0,
+        dt,
+      );
+
+      const carpWorldX = baseWorldX + this.carpathiaAvoidX;
+      const carpWorldZ = baseWorldZ + this.carpathiaAvoidZ;
       const waveY = Math.sin(this.simTime * 0.85) * 0.14;
       const wavePitch = Math.sin(this.simTime * 0.72) * 0.008;
-      const waveRoll = Math.cos(this.simTime * 0.62) * 0.012;
+      const waveRoll = Math.cos(this.simTime * 0.62) * 0.012 - this.carpathiaSteerYaw * 0.08;
       this.carpathia.root.position.set(carpWorldX, waveY, carpWorldZ);
-      this.carpathia.root.rotation.set(wavePitch, -this.headingRad + carpLocalYaw, waveRoll);
+      this.carpathia.root.rotation.set(
+        wavePitch,
+        -this.headingRad + carpLocalYaw + this.carpathiaSteerYaw,
+        waveRoll,
+      );
     }
 
     const rescueRes = this.ship.crewAndLifeboats.updateRescue(
@@ -1746,15 +2308,23 @@ export class TitanicEngine {
       this.carpathia.root,
       this.carpathia.boardingStationsLocal,
       this.ship.root,
+      {
+        active: this.warshipRescuing,
+        progress: this.warshipRescueProgress,
+        root: this.warship.root,
+        boardingStationsLocal: this.warship.boardingStationsLocal,
+      },
     );
     this.boatsRecovered = rescueRes.boatsRecovered;
     this.survivorsRescued = rescueRes.survivorsRescued;
+    this.warshipBoatsRecovered = rescueRes.warshipBoatsRecovered;
+    this.warshipSurvivors = rescueRes.warshipSurvivorsRescued;
     this.lifeboatsLaunched = 16;
 
     if (this.carpathia.root.visible) {
       this.carpathia.setRescueState(
         this.simTime,
-        this.survivorsRescued / 712,
+        rescueRes.carpathiaSurvivorsRescued / 356,
         laddersDeployed,
         sweepLight,
       );
@@ -1789,8 +2359,25 @@ export class TitanicEngine {
     }
 
     this.advanceRescueSimulation(dt);
+    this.stepNavalCombat(dt, 1.0, 'carpathia');
+    this.stepWarshipConsciousness(dt, 1.0, true);
     this.applyAtmosphere(1.0, this.rescueDawnMix);
-    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, 0, 1.0);
+    this.oceanAndSky.update(
+      this.simTime,
+      this.shipX,
+      this.shipZ,
+      this.headingRad,
+      0,
+      1.0,
+      this.warshipX,
+      this.warshipZ,
+      this.warshipHeadingRad,
+      this.warshipSpeedKnots,
+      this.warship2X,
+      this.warship2Z,
+      this.warship2HeadingRad,
+      this.warship2SpeedKnots,
+    );
     this.particles.update(dt);
     this.updateCamera(dt);
     this.syncUnderwaterCameraEffects(1.0, dt);
@@ -1837,6 +2424,9 @@ export class TitanicEngine {
 
     // Compass card rotates opposite to ship heading
     this.ship.compassCard.rotation.z = this.headingRad;
+
+    // Reciprocating Steam Engine Crankshafts & Pistons rotate proportional to speed
+    this.ship.setEngineSpeed(speedKnots, dt);
 
     // Chadburn Telegraph levers glide smoothly to selected notch angle
     const targetLever = TELEGRAPH_NOTCHES[this.telegraphIndex].leverAngle;
@@ -1931,6 +2521,883 @@ export class TitanicEngine {
     }
   }
 
+  private deploySubmarines(targetVessel: 'titanic' | 'carpathia'): void {
+    const refX = targetVessel === 'carpathia' ? this.carpathia.root.position.x : this.shipX;
+    const refZ = targetVessel === 'carpathia' ? this.carpathia.root.position.z : this.shipZ;
+    const refHeading = targetVessel === 'carpathia' ? -this.carpathia.root.rotation.y : this.headingRad;
+
+    const fwdX = Math.sin(refHeading);
+    const fwdZ = -Math.cos(refHeading);
+    const rightX = Math.cos(refHeading);
+    const rightZ = Math.sin(refHeading);
+
+    for (let i = 0; i < this.submarines.length; i++) {
+      const sub = this.submarines[i];
+      const aheadDist = targetVessel === 'titanic' ? 215 + i * 24 : 110 - i * 45;
+      const latDist = sub.sideSign * (162 + i * 24);
+      sub.x = refX + fwdX * aheadDist + rightX * latDist;
+      sub.z = refZ + fwdZ * aheadDist + rightZ * latDist;
+      sub.headingRad = Math.atan2(refX - sub.x, -(refZ - sub.z));
+      sub.speedKnots = targetVessel === 'titanic' ? 14 : 9;
+      sub.diveY = -5.5;
+      sub.damagePitch = 0;
+      sub.damageRoll = 0;
+      sub.hp = sub.maxHp;
+      sub.gunYaw = 0;
+      sub.gunFireFlash = 0;
+      sub.hitFireIntensity = 0;
+      sub.torpedoCooldown = 2.8 + i * 2.2;
+      sub.gunCooldown = 1.8 + i * 1.5;
+      sub.sinkElapsed = 0;
+      sub.wakeAccum = 0;
+      sub.targetVessel = targetVessel;
+      sub.state = 'hunting';
+      sub.rig.root.visible = true;
+      sub.rig.root.position.set(sub.x, 0, sub.z);
+      sub.rig.root.rotation.set(0, -sub.headingRad, 0);
+    }
+
+    this.eventText =
+      targetVessel === 'titanic'
+        ? 'SUBMARINES SURFACING — FIRING ON TITANIC! ESCORT WARSHIPS ENGAGING'
+        : 'U-BOATS SURFACING — FIRING ON RMS CARPATHIA! WARSHIPS RETURNING FIRE';
+    this.eventTimer = 5.2;
+    this.sound.playLookoutBell();
+    this.emitTelemetry();
+  }
+
+  private spawnProjectile(
+    kind: NavalProjectile['kind'],
+    ownerSide: NavalProjectile['ownerSide'],
+    targetKind: NavalProjectile['targetKind'],
+    targetSubId: number,
+    sx: number,
+    sy: number,
+    sz: number,
+    vx: number,
+    vy: number,
+    vz: number,
+    maxLife: number,
+  ): void {
+    for (let i = 0; i < MAX_NAVAL_PROJECTILES; i++) {
+      const p = this.projectiles[i];
+      if (p.active) continue;
+      p.active = true;
+      p.kind = kind;
+      p.ownerSide = ownerSide;
+      p.targetKind = targetKind;
+      p.targetSubId = targetSubId;
+      p.x = sx;
+      p.y = sy;
+      p.z = sz;
+      p.vx = vx;
+      p.vy = vy;
+      p.vz = vz;
+      p.life = maxLife;
+      p.maxLife = maxLife;
+      p.wakeAccum = 0;
+      return;
+    }
+  }
+
+  private stepNavalCombat(
+    dt: number,
+    seaMix: number,
+    primaryTarget: 'titanic' | 'carpathia',
+  ): void {
+    // 1. Trigger U-boat attacks during open Atlantic night watch (Titanic) and Rescue aftermath (Carpathia)
+    if (primaryTarget === 'titanic' && this.phase === 'playing' && seaMix > 0.68 && !this.submarineCruiseTriggered) {
+      this.cruiseSubTimer += dt;
+      if (this.cruiseSubTimer >= 3.8) {
+        this.submarineCruiseTriggered = true;
+        this.deploySubmarines('titanic');
+      }
+    } else if (
+      primaryTarget === 'carpathia' &&
+      this.carpathia.root.visible &&
+      !this.submarineAftermathTriggered &&
+      this.aftermathSeconds >= 64.5
+    ) {
+      const anyHunting = this.submarines.some((s) => s.state === 'hunting');
+      if (!anyHunting) {
+        this.submarineAftermathTriggered = true;
+        this.deploySubmarines('carpathia');
+      }
+    }
+
+    // Target world position for active submarines
+    const tgtX = primaryTarget === 'carpathia' && this.carpathia.root.visible
+      ? this.carpathia.root.position.x
+      : this.shipX;
+    const tgtZ = primaryTarget === 'carpathia' && this.carpathia.root.visible
+      ? this.carpathia.root.position.z
+      : this.shipZ;
+
+    // 2. Step each submarine (surfacing, maneuvering, firing upon Titanic/Carpathia, or sinking after warship hits)
+    for (let i = 0; i < this.submarines.length; i++) {
+      const sub = this.submarines[i];
+      if (sub.state === 'hidden' || sub.state === 'sunk') {
+        sub.rig.root.visible = false;
+        continue;
+      }
+      sub.rig.root.visible = true;
+      sub.gunFireFlash = Math.max(0, sub.gunFireFlash - dt * 4.5);
+      sub.hitFireIntensity = Math.max(0, sub.hitFireIntensity - dt * 0.45);
+
+      if (sub.state === 'hunting') {
+        sub.diveY = THREE.MathUtils.damp(sub.diveY, 0.0, 2.2, dt);
+
+        // Orbit & pace target beam at ~150-190m while steering away from warships & icebergs
+        const dxT = tgtX - sub.x;
+        const dzT = tgtZ - sub.z;
+        const distT = Math.hypot(dxT, dzT) || 1;
+        const radAngle = Math.atan2(dxT, -dzT);
+        const tangentBias = distT > 185 ? 0.55 : distT < 135 ? 1.85 : 1.18;
+        let desiredHeading = radAngle + sub.sideSign * tangentBias;
+
+        let avoidX = 0;
+        let avoidZ = 0;
+        for (const berg of this.icebergs) {
+          const bdx = sub.x - berg.x;
+          const bdz = sub.z - berg.z;
+          const bdist = Math.hypot(bdx, bdz);
+          if (bdist < berg.collisionRadius + 30 && bdist > 0.1) {
+            avoidX += (bdx / bdist) * 2.4;
+            avoidZ += (bdz / bdist) * 2.4;
+          }
+        }
+        if (Math.hypot(avoidX, avoidZ) > 0.05) {
+          desiredHeading = Math.atan2(Math.sin(desiredHeading) + avoidX, -Math.cos(desiredHeading) - avoidZ);
+        }
+
+        let dh = desiredHeading - sub.headingRad;
+        while (dh > Math.PI) dh -= Math.PI * 2;
+        while (dh < -Math.PI) dh += Math.PI * 2;
+        sub.headingRad += THREE.MathUtils.clamp(dh, -0.5 * dt, 0.5 * dt);
+
+        const moveSpd = sub.speedKnots * 1.95;
+        sub.x += Math.sin(sub.headingRad) * moveSpd * dt;
+        sub.z += -Math.cos(sub.headingRad) * moveSpd * dt;
+
+        // Train 8.8cm deck gun toward Titanic or Carpathia
+        const sFwdX = Math.sin(sub.headingRad);
+        const sFwdZ = -Math.cos(sub.headingRad);
+        const sRightX = Math.cos(sub.headingRad);
+        const sRightZ = Math.sin(sub.headingRad);
+        const localTX = dxT * sRightX + dzT * sRightZ;
+        const localTZ = -(dxT * sFwdX + dzT * sFwdZ);
+        sub.gunYaw = Math.atan2(-localTX, -localTZ);
+
+        // Only fire once conning tower & deck gun are above surface
+        if (sub.diveY > -0.7 && (primaryTarget === 'carpathia' || this.phase === 'playing')) {
+          sub.torpedoCooldown -= dt;
+          if (sub.torpedoCooldown <= 0) {
+            sub.torpedoCooldown = 6.5 + Math.random() * 2.5;
+            const tSpd = 26;
+            const aimSpread = (Math.random() - 0.5) * 0.14;
+            const dirX = dxT / distT;
+            const dirZ = dzT / distT;
+            const cosA = Math.cos(aimSpread);
+            const sinA = Math.sin(aimSpread);
+            const launchVx = (dirX * cosA - dirZ * sinA) * tSpd;
+            const launchVz = (dirX * sinA + dirZ * cosA) * tSpd;
+            this.spawnProjectile(
+              'torpedo',
+              'submarine',
+              primaryTarget,
+              sub.id,
+              sub.x + sFwdX * 30,
+              0.2,
+              sub.z + sFwdZ * 30,
+              launchVx,
+              0,
+              launchVz,
+              9.0,
+            );
+            this.sound.playTorpedoLaunch();
+          }
+
+          sub.gunCooldown -= dt;
+          if (sub.gunCooldown <= 0) {
+            sub.gunCooldown = 4.2 + Math.random() * 1.8;
+            sub.gunFireFlash = 1.0;
+            const flightT = Math.min(2.6, Math.max(1.2, distT / 72));
+            const muzX = sub.x + sFwdX * 16.5;
+            const muzZ = sub.z + sFwdZ * 16.5;
+            const vx = (tgtX + (Math.random() - 0.5) * 14 - muzX) / flightT;
+            const vz = (tgtZ + (Math.random() - 0.5) * 14 - muzZ) / flightT;
+            const vy = (4.0 - 2.8) / flightT + 0.5 * 9.8 * flightT;
+            this.spawnProjectile(
+              'subShell',
+              'submarine',
+              primaryTarget,
+              sub.id,
+              muzX,
+              2.8,
+              muzZ,
+              vx,
+              vy,
+              vz,
+              flightT + 0.6,
+            );
+            this.sound.playNavalCannon(false);
+          }
+        }
+
+        // Emit subtle foaming diesel surface wake particles
+        sub.wakeAccum += dt * 7;
+        while (sub.wakeAccum >= 1) {
+          sub.wakeAccum -= 1;
+          this.particles.emit(
+            sub.x - sFwdX * 30 + (Math.random() - 0.5) * 2.2,
+            0.25,
+            sub.z - sFwdZ * 30 + (Math.random() - 0.5) * 2.2,
+            (Math.random() - 0.5) * 1.4,
+            0.9 + Math.random() * 0.9,
+            (Math.random() - 0.5) * 1.4,
+            0.55 + Math.random() * 0.5,
+            0.7 + Math.random() * 0.4,
+            3.0,
+            0xdbeafe,
+          );
+        }
+      } else if (sub.state === 'sinking') {
+        sub.sinkElapsed += dt;
+        const tSink = THREE.MathUtils.clamp(sub.sinkElapsed / 6.5, 0, 1);
+        sub.diveY = THREE.MathUtils.lerp(0, -24, Math.pow(tSink, 1.25));
+        sub.damagePitch = THREE.MathUtils.lerp(0, -0.52, tSink);
+        sub.damageRoll = sub.sideSign * THREE.MathUtils.lerp(0.15, 0.72, tSink);
+        sub.hitFireIntensity = Math.max(sub.hitFireIntensity, (1 - tSink) * 0.75);
+
+        if (tSink < 0.75 && Math.random() < 0.65) {
+          this.particles.emit(
+            sub.x + (Math.random() - 0.5) * 6,
+            Math.max(0.3, sub.diveY + 3.5),
+            sub.z + (Math.random() - 0.5) * 6,
+            (Math.random() - 0.5) * 3,
+            2.5 + Math.random() * 3,
+            (Math.random() - 0.5) * 3,
+            0.9 + Math.random() * 0.8,
+            1.1,
+            1.5,
+            Math.random() < 0.4 ? 0xfb923c : 0x334155,
+          );
+        }
+
+        if (tSink >= 1) {
+          sub.state = 'sunk';
+          sub.rig.root.visible = false;
+        }
+      }
+
+      sub.rig.root.position.set(sub.x, 0, sub.z);
+      sub.rig.root.rotation.set(0, -sub.headingRad, 0);
+      sub.rig.setSubmarineState(
+        this.simTime + i * 1.7,
+        sub.state === 'hunting' ? 0.85 : 0.1,
+        seaMix,
+        sub.diveY,
+        sub.damagePitch,
+        sub.damageRoll,
+        sub.gunYaw,
+        sub.gunFireFlash,
+        sub.hitFireIntensity,
+      );
+    }
+
+    // 3. Assign Royal Navy Escort Warships to counter-attack active hunting submarines
+    const sub0 = this.submarines[0];
+    const sub1 = this.submarines[1];
+    const targetForW1 = sub0.state === 'hunting' ? sub0 : sub1.state === 'hunting' ? sub1 : null;
+    const targetForW2 = sub1.state === 'hunting' ? sub1 : sub0.state === 'hunting' ? sub0 : null;
+
+    this.warship1FireFlash = Math.max(0, this.warship1FireFlash - dt * 5.0);
+    this.warship2FireFlash = Math.max(0, this.warship2FireFlash - dt * 5.0);
+
+    this.warship1Engaged = Boolean(targetForW1 && targetForW1.diveY > -1.4);
+    if (this.warship1Engaged && targetForW1) {
+      const wFwdX = Math.sin(this.warshipHeadingRad);
+      const wFwdZ = -Math.cos(this.warshipHeadingRad);
+      const wRightX = Math.cos(this.warshipHeadingRad);
+      const wRightZ = Math.sin(this.warshipHeadingRad);
+      const dx = targetForW1.x - this.warshipX;
+      const dz = targetForW1.z - this.warshipZ;
+      this.warship1AimLocalX = dx * wRightX + dz * wRightZ;
+      this.warship1AimLocalZ = -(dx * wFwdX + dz * wFwdZ);
+
+      this.warship1FireCooldown -= dt;
+      if (this.warship1FireCooldown <= 0) {
+        this.warship1FireCooldown = 2.6 + Math.random() * 0.9;
+        this.warship1FireFlash = 1.0;
+        const dist = Math.hypot(dx, dz) || 1;
+        const flightT = THREE.MathUtils.clamp(dist / 78, 0.9, 2.2);
+        const muzX = this.warshipX + wFwdX * 42;
+        const muzZ = this.warshipZ + wFwdZ * 42;
+        const vx = (targetForW1.x - muzX) / flightT;
+        const vz = (targetForW1.z - muzZ) / flightT;
+        const vy = (1.6 - 7.8) / flightT + 0.5 * 9.8 * flightT;
+        this.spawnProjectile(
+          'warshipShell',
+          'warship',
+          'submarine',
+          targetForW1.id,
+          muzX,
+          7.8,
+          muzZ,
+          vx,
+          vy,
+          vz,
+          flightT + 0.5,
+        );
+        this.sound.playNavalCannon(true);
+      }
+    }
+
+    this.warship2Engaged = Boolean(targetForW2 && targetForW2.diveY > -1.4);
+    if (this.warship2Engaged && targetForW2) {
+      const w2FwdX = Math.sin(this.warship2HeadingRad);
+      const w2FwdZ = -Math.cos(this.warship2HeadingRad);
+      const w2RightX = Math.cos(this.warship2HeadingRad);
+      const w2RightZ = Math.sin(this.warship2HeadingRad);
+      const dx = targetForW2.x - this.warship2X;
+      const dz = targetForW2.z - this.warship2Z;
+      this.warship2AimLocalX = dx * w2RightX + dz * w2RightZ;
+      this.warship2AimLocalZ = -(dx * w2FwdX + dz * w2FwdZ);
+
+      this.warship2FireCooldown -= dt;
+      if (this.warship2FireCooldown <= 0) {
+        this.warship2FireCooldown = 2.5 + Math.random() * 0.9;
+        this.warship2FireFlash = 1.0;
+        const dist = Math.hypot(dx, dz) || 1;
+        const flightT = THREE.MathUtils.clamp(dist / 78, 0.9, 2.2);
+        const muzX = this.warship2X + w2FwdX * 42;
+        const muzZ = this.warship2Z + w2FwdZ * 42;
+        const vx = (targetForW2.x - muzX) / flightT;
+        const vz = (targetForW2.z - muzZ) / flightT;
+        const vy = (1.6 - 7.8) / flightT + 0.5 * 9.8 * flightT;
+        this.spawnProjectile(
+          'warshipShell',
+          'warship',
+          'submarine',
+          targetForW2.id,
+          muzX,
+          7.8,
+          muzZ,
+          vx,
+          vy,
+          vz,
+          flightT + 0.5,
+        );
+        this.sound.playNavalCannon(true);
+      }
+    }
+
+    // 4. Advance all active torpedoes & naval artillery shells + update InstancedMesh
+    let anyProjUpdated = false;
+    for (let i = 0; i < MAX_NAVAL_PROJECTILES; i++) {
+      const p = this.projectiles[i];
+      if (!p.active) continue;
+      anyProjUpdated = true;
+
+      p.life -= dt;
+      if (p.kind !== 'torpedo') {
+        p.vy -= 9.8 * dt;
+      }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+
+      // Torpedo foaming wake trail
+      if (p.kind === 'torpedo') {
+        p.wakeAccum += dt * 22;
+        while (p.wakeAccum >= 1) {
+          p.wakeAccum -= 1;
+          this.particles.emit(
+            p.x + (Math.random() - 0.5) * 0.6,
+            0.35,
+            p.z + (Math.random() - 0.5) * 0.6,
+            (Math.random() - 0.5) * 1.2,
+            0.8 + Math.random() * 0.8,
+            (Math.random() - 0.5) * 1.2,
+            0.45 + Math.random() * 0.35,
+            0.55,
+            2.2,
+            0xe0f2fe,
+          );
+        }
+      }
+
+      // Impact detection
+      let impacted = false;
+      if (p.ownerSide === 'submarine') {
+        if (p.targetKind === 'titanic' && this.phase === 'playing') {
+          const dxS = p.x - this.shipX;
+          const dzS = p.z - this.shipZ;
+          const distS = Math.hypot(dxS, dzS);
+          if (distS < 45) {
+            const tFwdX = Math.sin(this.headingRad);
+            const tFwdZ = -Math.cos(this.headingRad);
+            const tRightX = Math.cos(this.headingRad);
+            const tRightZ = Math.sin(this.headingRad);
+            const along = dxS * tFwdX + dzS * tFwdZ;
+            const lat = dxS * tRightX + dzS * tRightZ;
+            if (Math.abs(along) < 120 && Math.abs(lat) < 14.2 && p.y < 14) {
+              impacted = true;
+              const isTorp = p.kind === 'torpedo';
+              this.applyHullBreach(
+                isTorp ? 14 : 5,
+                lat >= 0 ? -tRightX : tRightX,
+                lat >= 0 ? -tRightZ : tRightZ,
+                0.8,
+                p.x,
+                p.z,
+                0.6,
+                isTorp ? 7 : 2,
+                false,
+                isTorp ? 'U-BOAT TORPEDO STRIKE' : 'U-BOAT DECK GUN HIT',
+                lat,
+              );
+            }
+          }
+        } else if (p.targetKind === 'carpathia' && this.carpathia.root.visible) {
+          const cx = this.carpathia.root.position.x;
+          const cz = this.carpathia.root.position.z;
+          if (Math.hypot(p.x - cx, p.z - cz) < 28 && p.y < 14) {
+            impacted = true;
+            for (let k = 0; k < 18; k++) {
+              this.particles.emit(
+                p.x + (Math.random() - 0.5) * 3,
+                1.5,
+                p.z + (Math.random() - 0.5) * 3,
+                (Math.random() - 0.5) * 7,
+                4 + Math.random() * 7,
+                (Math.random() - 0.5) * 7,
+                0.8 + Math.random() * 0.7,
+                0.9,
+                9.8,
+                k < 6 ? 0xfb923c : 0xe0f2fe,
+              );
+            }
+            this.sound.playCollisionImpact(0.32);
+          }
+        }
+      } else if (p.ownerSide === 'warship') {
+        const tgtSub = this.submarines[p.targetSubId];
+        if (tgtSub && tgtSub.state === 'hunting') {
+          const distSub = Math.hypot(p.x - tgtSub.x, p.z - tgtSub.z);
+          if (distSub < 12.5 && p.y <= 5.5) {
+            impacted = true;
+            tgtSub.hp -= 1;
+            tgtSub.hitFireIntensity = 1.0;
+            const lethal = tgtSub.hp <= 0;
+            for (let k = 0; k < (lethal ? 36 : 22); k++) {
+              this.particles.emit(
+                tgtSub.x + (Math.random() - 0.5) * 5,
+                2.0,
+                tgtSub.z + (Math.random() - 0.5) * 5,
+                (Math.random() - 0.5) * 10,
+                5 + Math.random() * 10,
+                (Math.random() - 0.5) * 10,
+                0.75 + Math.random() * 1.1,
+                1.0 + Math.random() * 0.5,
+                9.8,
+                k < (lethal ? 18 : 10) ? 0xff7b29 : 0xe0f2fe,
+              );
+            }
+            this.sound.playSubmarineStruck(lethal);
+            if (lethal) {
+              tgtSub.state = 'sinking';
+              tgtSub.sinkElapsed = 0;
+              this.submarinesSunk += 1;
+              this.score += 500;
+              const remaining = this.submarines.filter((s) => s.state === 'hunting').length;
+              this.eventText =
+                remaining === 0
+                  ? 'ALL HOSTILE U-BOATS STRUCK & SUNK BY ROYAL NAVY WARSHIPS!'
+                  : `${tgtSub.label} STRUCK BY WARSHIPS — GOING DOWN!`;
+              this.eventTimer = 4.6;
+              this.emitTelemetry();
+            } else {
+              this.eventText = `WARSHIPS STRIKE ${tgtSub.label}!`;
+              this.eventTimer = 2.4;
+            }
+          }
+        }
+      }
+
+      // Splash on water miss
+      if (!impacted && (p.y <= 0 || p.life <= 0)) {
+        impacted = true;
+        if (p.kind !== 'torpedo') {
+          for (let k = 0; k < 8; k++) {
+            this.particles.emit(
+              p.x,
+              0.4,
+              p.z,
+              (Math.random() - 0.5) * 4,
+              3 + Math.random() * 5,
+              (Math.random() - 0.5) * 4,
+              0.6 + Math.random() * 0.6,
+              0.7,
+              9.8,
+              0xdbeafe,
+            );
+          }
+        }
+      }
+
+      if (impacted) {
+        p.active = false;
+        _projDummy.position.set(0, -50, 0);
+        _projDummy.scale.setScalar(0.001);
+        _projDummy.updateMatrix();
+        this.projectileMesh.setMatrixAt(i, _projDummy.matrix);
+      } else {
+        _projDummy.position.set(p.x, p.y, p.z);
+        _projDummy.lookAt(p.x + p.vx, p.y + p.vy, p.z + p.vz);
+        if (p.kind === 'torpedo') {
+          _projDummy.scale.set(1.1, 1.1, 2.3);
+          _projColor.setHex(0x7dd3fc);
+        } else if (p.kind === 'subShell') {
+          _projDummy.scale.set(1.0, 1.0, 1.3);
+          _projColor.setHex(0xfbbf24);
+        } else {
+          _projDummy.scale.set(1.35, 1.35, 1.85);
+          _projColor.setHex(0xfff3b0);
+        }
+        _projDummy.updateMatrix();
+        this.projectileMesh.setMatrixAt(i, _projDummy.matrix);
+        this.projectileMesh.setColorAt(i, _projColor);
+      }
+    }
+
+    if (anyProjUpdated) {
+      this.projectileMesh.instanceMatrix.needsUpdate = true;
+      if (this.projectileMesh.instanceColor) this.projectileMesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  private stepSingleWarship(
+    dt: number,
+    isSecondary: boolean,
+    seaMix: number,
+    rescueWatch: boolean,
+  ): void {
+    const fwdX = Math.sin(this.headingRad);
+    const fwdZ = -Math.cos(this.headingRad);
+    const rightX = Math.cos(this.headingRad);
+    const rightZ = Math.sin(this.headingRad);
+
+    let wx = isSecondary ? this.warship2X : this.warshipX;
+    let wz = isSecondary ? this.warship2Z : this.warshipZ;
+    let wh = isSecondary ? this.warship2HeadingRad : this.warshipHeadingRad;
+    let wyr = isSecondary ? this.warship2YawRate : this.warshipYawRate;
+    let wspd = isSecondary ? this.warship2SpeedKnots : this.warshipSpeedKnots;
+    let wroll = isSecondary ? this.warship2Roll : this.warshipRoll;
+    let joined = isSecondary ? this.warship2HasJoinedWake : this.warshipHasJoinedWake;
+    let smokeAcc = isSecondary ? this.warship2SmokeAccum : this.warshipSmokeAccum;
+    let sprayAcc = isSecondary ? this.warship2SprayAccum : this.warshipSprayAccum;
+
+    const wFwdX = Math.sin(wh);
+    const wFwdZ = -Math.cos(wh);
+    const wRightX = Math.cos(wh);
+    const wRightZ = Math.sin(wh);
+
+    const wakeOffsetAlong = isSecondary ? 245 : 306;
+    const wakeOffsetLat = isSecondary ? 76 : -26;
+    const anchorX = isSecondary ? 92 : -86;
+    const anchorZ = isSecondary ? -280 : -265;
+    const rescueLat = isSecondary ? 105 : -84;
+    const rescueAlong = isSecondary ? -10 : -16;
+
+    if (dt > 0 && this.phase !== 'title') {
+      const relShipX = wx - this.shipX;
+      const relShipZ = wz - this.shipZ;
+      const alongAhead = relShipX * fwdX + relShipZ * fwdZ;
+      const lateral = relShipX * rightX + relShipZ * rightZ;
+
+      if (!joined && this.shipZ <= -375) {
+        joined = true;
+      }
+
+      let targetHeading = this.headingRad;
+      let desiredKnots = 0;
+      let avoidX = 0;
+      let avoidZ = 0;
+
+      if (rescueWatch) {
+        if ((this.phase === 'aftermath' || this.phase === 'gameover') && this.aftermathSeconds >= 3.5) {
+          const standX = this.shipX + rightX * rescueLat + fwdX * rescueAlong;
+          const standZ = this.shipZ + rightZ * rescueLat + fwdZ * rescueAlong;
+          const dxStand = standX - wx;
+          const dzStand = standZ - wz;
+          const distStand = Math.hypot(dxStand, dzStand);
+          if (distStand > 15) {
+            targetHeading = Math.atan2(dxStand, -dzStand);
+            desiredKnots = Math.min(12.5, Math.max(4.5, distStand * 0.16));
+          } else {
+            targetHeading = this.headingRad + (isSecondary ? 0.14 : -0.14);
+            desiredKnots = 0;
+          }
+        } else {
+          const standX = this.shipX - fwdX * 240 + rightX * (isSecondary ? 78 : -68);
+          const standZ = this.shipZ - fwdZ * 240 + rightZ * (isSecondary ? 78 : -68);
+          const dxStand = standX - wx;
+          const dzStand = standZ - wz;
+          const distStand = Math.hypot(dxStand, dzStand);
+          if (distStand > 25) {
+            targetHeading = Math.atan2(dxStand, -dzStand);
+            desiredKnots = Math.min(8, distStand * 0.14);
+          } else {
+            targetHeading = Math.atan2(this.shipX - wx, -(this.shipZ - wz));
+            desiredKnots = 0;
+          }
+        }
+      } else if (!joined) {
+        const dxAnchor = anchorX - wx;
+        const dzAnchor = anchorZ - wz;
+        const distAnchor = Math.hypot(dxAnchor, dzAnchor);
+        targetHeading = distAnchor > 6 ? Math.atan2(dxAnchor, -dzAnchor) : isSecondary ? -0.04 : 0.04;
+        desiredKnots = distAnchor > 6 ? Math.min(4.5, distAnchor * 0.25) : 0;
+
+        if (alongAhead > -210 && alongAhead < 110 && Math.abs(lateral) < 46) {
+          const pushSide = lateral >= 0 ? 1 : -1;
+          avoidX += rightX * pushSide * 2.5;
+          avoidZ += rightZ * pushSide * 2.5;
+          desiredKnots = -4.0;
+        }
+      } else {
+        const wakeX = this.shipX - fwdX * wakeOffsetAlong + rightX * wakeOffsetLat;
+        const wakeZ = this.shipZ - fwdZ * wakeOffsetAlong + rightZ * wakeOffsetLat;
+
+        let aimX = wakeX;
+        let aimZ = wakeZ;
+        if (alongAhead > -225 && Math.abs(lateral) < 52) {
+          const clearSide = lateral >= 0 ? 1 : -1;
+          aimX = this.shipX - fwdX * 265 + rightX * (clearSide * 64);
+          aimZ = this.shipZ - fwdZ * 265 + rightZ * (clearSide * 64);
+        } else if (this.harbor.root.visible && wz > -525 && wz < -390) {
+          aimX = THREE.MathUtils.clamp(aimX, -38, 38);
+        }
+
+        const toAimX = aimX - wx;
+        const toAimZ = aimZ - wz;
+        const distToAim = Math.hypot(toAimX, toAimZ);
+        const distToWake = Math.hypot(wakeX - wx, wakeZ - wz);
+
+        const dirAimX = distToAim > 0.5 ? toAimX / distToAim : fwdX;
+        const dirAimZ = distToAim > 0.5 ? toAimZ / distToAim : fwdZ;
+        const blendWeight = THREE.MathUtils.clamp(distToAim / 75, 0.18, 1.0);
+        const steerX = dirAimX * blendWeight + fwdX * (1 - blendWeight);
+        const steerZ = dirAimZ * blendWeight + fwdZ * (1 - blendWeight);
+        targetHeading = Math.atan2(steerX + avoidX, -(steerZ + avoidZ));
+
+        const aheadOfWake = (wakeX - wx) * wFwdX + (wakeZ - wz) * wFwdZ;
+        const titanicCruise = Math.max(0, this.speedKnots);
+        if (distToWake > 42 && aheadOfWake > 0) {
+          desiredKnots = Math.min(28, Math.max(titanicCruise + 6.5, aheadOfWake * 0.24));
+        } else {
+          desiredKnots = THREE.MathUtils.clamp(titanicCruise + aheadOfWake * 0.22, -4, 27);
+        }
+        if (Math.abs(this.speedKnots) < 0.8 && distToWake < 36) {
+          desiredKnots = 0;
+        }
+      }
+
+      if (!rescueWatch && alongAhead > -268 && alongAhead < 110 && Math.abs(lateral) < 36) {
+        const pushSide = lateral >= 0 ? 1 : -1;
+        const urgency = 1 - Math.abs(lateral) / 36;
+        avoidX += rightX * pushSide * (1.4 + urgency * 2.4) - fwdX * 1.6;
+        avoidZ += rightZ * pushSide * (1.4 + urgency * 2.4) - fwdZ * 1.6;
+        desiredKnots = Math.min(desiredKnots, alongAhead > -235 ? -5 : 2);
+      }
+
+      // Inter-warship spacing
+      const otherX = isSecondary ? this.warshipX : this.warship2X;
+      const otherZ = isSecondary ? this.warshipZ : this.warship2Z;
+      const dWarX = wx - otherX;
+      const dWarZ = wz - otherZ;
+      const distWar = Math.hypot(dWarX, dWarZ);
+      if (distWar < 54 && distWar > 0.1) {
+        const push = ((54 - distWar) / 54) * 3.0;
+        avoidX += (dWarX / distWar) * push;
+        avoidZ += (dWarZ / distWar) * push;
+      }
+
+      for (let i = 0; i < this.icebergs.length; i++) {
+        const berg = this.icebergs[i];
+        const dx = wx - berg.x;
+        const dz = wz - berg.z;
+        const dist = Math.hypot(dx, dz);
+        const safeDist = berg.collisionRadius + 34;
+        if (dist < safeDist && dist > 0.05) {
+          const push = ((safeDist - dist) / safeDist) * 3.4;
+          avoidX += (dx / dist) * push;
+          avoidZ += (dz / dist) * push;
+        }
+      }
+
+      if (this.harbor.root.visible) {
+        const boxObs = this.harbor.getBoxObstacles();
+        for (let b = 0; b < boxObs.length; b++) {
+          const box = boxObs[b];
+          const cx = THREE.MathUtils.clamp(wx, box.minX, box.maxX);
+          const cz = THREE.MathUtils.clamp(wz, box.minZ, box.maxZ);
+          const vx = wx - cx;
+          const vz = wz - cz;
+          const d = Math.hypot(vx, vz);
+          const margin = 22;
+          if (d < margin) {
+            const nx = d > 0.01 ? vx / d : 0;
+            const nz = d > 0.01 ? vz / d : -1;
+            const push = ((margin - d) / margin) * 3.6;
+            avoidX += nx * push;
+            avoidZ += nz * push;
+          }
+        }
+      }
+
+      if (Math.hypot(avoidX, avoidZ) > 0.05) {
+        const baseX = Math.sin(targetHeading);
+        const baseZ = -Math.cos(targetHeading);
+        targetHeading = Math.atan2(baseX + avoidX, -(baseZ + avoidZ));
+      }
+
+      let dh = targetHeading - wh;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+
+      const speedAuth = 0.42 + 0.58 * Math.min(1, Math.abs(wspd) / 18);
+      const targetYawRate = THREE.MathUtils.clamp(dh * 1.4, -0.48, 0.48) * speedAuth;
+      wyr = THREE.MathUtils.damp(wyr, targetYawRate, 2.5, dt);
+      wh += wyr * dt;
+
+      const accel = desiredKnots < wspd ? 1.1 : 0.72;
+      wspd = THREE.MathUtils.damp(wspd, desiredKnots, accel, dt);
+
+      const moveSpd = wspd * 2.15;
+      wx += Math.sin(wh) * moveSpd * dt;
+      wz += -Math.cos(wh) * moveSpd * dt;
+    }
+
+    const phaseOff = isSecondary ? 2.4 : 1.1;
+    const waveY = Math.sin(this.simTime * 0.92 + phaseOff) * 0.14;
+    const wavePitch = Math.sin(this.simTime * 0.78 + phaseOff * 0.55) * 0.008;
+    const waveRoll = Math.cos(this.simTime * 0.66 + phaseOff * 0.8) * 0.012 - wyr * 0.12;
+    wroll = THREE.MathUtils.damp(wroll, waveRoll, 4, Math.max(dt, 0.016));
+
+    const rig = isSecondary ? this.warship2 : this.warship;
+    rig.root.position.set(wx, waveY, wz);
+    rig.root.rotation.set(wavePitch, -wh, wroll);
+
+    const engaged = isSecondary ? this.warship2Engaged : this.warship1Engaged;
+    const aimLX = isSecondary ? this.warship2AimLocalX : this.warship1AimLocalX;
+    const aimLZ = isSecondary ? this.warship2AimLocalZ : this.warship1AimLocalZ;
+    const flash = isSecondary ? this.warship2FireFlash : this.warship1FireFlash;
+
+    let sweepLocalX: number | undefined;
+    let sweepLocalZ: number | undefined;
+    const rescueSweep = rescueWatch && this.carpathiaStage !== 'complete';
+    const activeSearchSweep = engaged || rescueSweep;
+    if (engaged) {
+      sweepLocalX = aimLX;
+      sweepLocalZ = aimLZ;
+    } else if (rescueSweep) {
+      const dxT = this.shipX - wx;
+      const dzT = this.shipZ - wz;
+      sweepLocalX = dxT * wRightX + dzT * wRightZ + Math.sin(this.simTime * 0.65 + phaseOff) * 34;
+      sweepLocalZ = -(dxT * wFwdX + dzT * wFwdZ);
+    }
+
+    rig.setNavalState(
+      this.simTime + (isSecondary ? 1.3 : 0),
+      wspd,
+      seaMix,
+      activeSearchSweep,
+      sweepLocalX,
+      sweepLocalZ,
+      {
+        laddersDeployed: !isSecondary && this.warshipRescuing,
+        boardedRatio: !isSecondary ? this.warshipSurvivors / 356 : 0,
+        combatAim: engaged
+          ? {
+              targetLocalX: aimLX,
+              targetLocalZ: aimLZ,
+              firingFlash: flash,
+            }
+          : undefined,
+      },
+    );
+
+    if (dt > 0 && this.phase !== 'paused') {
+      const absSpd = Math.abs(wspd);
+      smokeAcc += dt * (1.2 + absSpd * 0.22);
+      while (smokeAcc >= 1) {
+        smokeAcc -= 1;
+        const fz = [-10.5, 4.5, 19.5][Math.floor(Math.random() * 3)];
+        this.particles.emit(
+          wx - wFwdX * fz + (Math.random() - 0.5) * 1.4,
+          20.6,
+          wz - wFwdZ * fz + (Math.random() - 0.5) * 1.4,
+          -wFwdX * (1.8 + absSpd * 0.3) + (Math.random() - 0.5) * 1.4,
+          2.0 + Math.random() * 1.2,
+          -wFwdZ * (1.8 + absSpd * 0.3) + (Math.random() - 0.5) * 1.4,
+          1.3 + Math.random() * 1.0,
+          2.0 + Math.random() * 0.8,
+          -0.7,
+          seaMix < 0.5 ? 0x454e59 : 0x2a3340,
+        );
+      }
+
+      if (absSpd > 4) {
+        sprayAcc += dt * (absSpd * 0.65);
+        while (sprayAcc >= 1) {
+          sprayAcc -= 1;
+          const side = Math.random() < 0.5 ? -1 : 1;
+          this.particles.emit(
+            wx + wFwdX * 71.5 + wRightX * side * 1.2,
+            0.45,
+            wz + wFwdZ * 71.5 + wRightZ * side * 1.2,
+            wRightX * side * (2.2 + Math.random() * 2.8) - wFwdX * 1.6,
+            1.6 + Math.random() * 2.0,
+            wRightZ * side * (2.2 + Math.random() * 2.8) - wFwdZ * 1.6,
+            0.4 + Math.random() * 0.45,
+            0.5 + Math.random() * 0.3,
+            9.5,
+            0xd8eefc,
+          );
+        }
+      }
+    }
+
+    if (isSecondary) {
+      this.warship2X = wx;
+      this.warship2Z = wz;
+      this.warship2HeadingRad = wh;
+      this.warship2YawRate = wyr;
+      this.warship2SpeedKnots = wspd;
+      this.warship2Roll = wroll;
+      this.warship2HasJoinedWake = joined;
+      this.warship2SmokeAccum = smokeAcc;
+      this.warship2SprayAccum = sprayAcc;
+    } else {
+      this.warshipX = wx;
+      this.warshipZ = wz;
+      this.warshipHeadingRad = wh;
+      this.warshipYawRate = wyr;
+      this.warshipSpeedKnots = wspd;
+      this.warshipRoll = wroll;
+      this.warshipHasJoinedWake = joined;
+      this.warshipSmokeAccum = smokeAcc;
+      this.warshipSprayAccum = sprayAcc;
+    }
+  }
+
+  private stepWarshipConsciousness(dt: number, seaMix: number, rescueWatch: boolean): void {
+    this.stepSingleWarship(dt, false, seaMix, rescueWatch);
+    this.stepSingleWarship(dt, true, seaMix, rescueWatch);
+  }
+
   private manageIcebergField(dt: number, worldSpeed: number, fwdX: number, fwdZ: number): void {
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
@@ -2011,13 +3478,285 @@ export class TitanicEngine {
     }
   }
 
-  private checkIcebergInteractions(dt: number, fwdX: number, fwdZ: number): void {
+  private applyHullBreach(
+    dmgRaw: number,
+    pushNx: number,
+    pushNz: number,
+    pushDist: number,
+    hitX: number,
+    hitZ: number,
+    speedRatio: number,
+    floodJump: number,
+    isHeavyBow: boolean,
+    label: string,
+    sideSign: number,
+  ): void {
+    this.combo = 1;
+    this.hullIntegrity = Math.max(0, this.hullIntegrity - Math.round(dmgRaw));
+    this.listDirection = sideSign >= 0 ? 1 : -1;
+    this.headingRad += (sideSign >= 0 ? -1 : 1) * (isHeavyBow ? 0.07 : 0.12);
+    this.shipX += pushNx * pushDist;
+    this.shipZ += pushNz * pushDist;
+    this.speedKnots *= isHeavyBow ? 0.32 : 0.58;
+    this.floodingPct = Math.min(100, this.floodingPct + floodJump);
+
+    this.hitstopTimer = isHeavyBow ? 0.065 : 0.045;
+    this.shakeIntensity = isHeavyBow ? 1.0 : 0.72;
+    this.damageFlashTimer = 0.45;
+    this.onDamageFlash(1.0);
+    this.particles.burstIceImpact(hitX, 3.2, hitZ, isHeavyBow ? 44 : 28);
+    this.sound.playCollisionImpact(Math.max(0.45, speedRatio));
+
+    if (!this.autopilotEnabled && label === 'NORTH ATLANTIC ICEBERG') {
+      this.bowPanicActive = true;
+      this.panicShoutCooldown = 3.2;
+      this.sound.playCrowdScreamPanic();
+      this.eventText = 'ICEBERG STRIKE — PASSENGERS SCREAMING & RUSHING TO THE BOW!';
+      this.eventTimer = 4.6;
+    } else {
+      this.eventText = `COLLISION: ${label} — HULL BREACHED`;
+      this.eventTimer = 3.0;
+    }
+    this.emitTelemetry();
+  }
+
+  private checkAllObstacles(dt: number, fwdX: number, fwdZ: number): void {
+    // Decrement per-obstacle collision cooldowns
+    for (const [key, t] of this.obstacleCooldowns) {
+      const next = t - dt;
+      if (next <= 0) this.obstacleCooldowns.delete(key);
+      else this.obstacleCooldowns.set(key, next);
+    }
+
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
+    const speedRatio = Math.max(0.35, Math.abs(this.speedKnots) / 20);
 
     let closestWarningDist = Infinity;
     let closestWarningText: string | null = null;
+    let closestHazardSide = 0;
 
+    // -----------------------------------------------------------------------
+    // A. Harbor Escort Vessels (Tugs, Pilot Vessel), Harbor Lifeboats, Buoys, Piers, Quay & Breakwaters
+    // -----------------------------------------------------------------------
+    if (this.harbor.root.visible) {
+      const circleObs = this.harbor.getCircleObstacles();
+      for (let i = 0; i < circleObs.length; i++) {
+        const obs = circleObs[i];
+        const dx = obs.x - this.shipX;
+        const dz = obs.z - this.shipZ;
+        const ahead = dx * fwdX + dz * fwdZ;
+        const lateral = dx * rightX + dz * rightZ;
+
+        if (ahead > 72 && ahead < 185 && Math.abs(lateral) < obs.radius + 15) {
+          if (ahead < closestWarningDist) {
+            closestWarningDist = ahead;
+            closestHazardSide = Math.abs(lateral) < 5 ? 0 : lateral < 0 ? -1 : 1;
+            closestWarningText =
+              obs.kind === 'lifeboat'
+                ? 'LIFEBOAT IN CHANNEL AHEAD'
+                : obs.kind === 'tug' || obs.kind === 'pilot'
+                  ? `${obs.label} CLOSE AHEAD`
+                  : `${obs.label} DEAD AHEAD`;
+          }
+        }
+
+        if (this.obstacleCooldowns.has(obs.id)) continue;
+
+        for (let p = 0; p < HULL_CHECK_POINTS.length; p++) {
+          const hp = HULL_CHECK_POINTS[p];
+          const px = this.shipX + fwdX * -hp.zLocal;
+          const pz = this.shipZ + fwdZ * -hp.zLocal;
+          const vx = px - obs.x;
+          const vz = pz - obs.z;
+          const dist = Math.hypot(vx, vz);
+          const minAllowed = obs.radius + hp.radius;
+          if (dist < minAllowed) {
+            this.obstacleCooldowns.set(obs.id, 1.65);
+            const nx = dist > 0.001 ? vx / dist : -rightX;
+            const nz = dist > 0.001 ? vz / dist : -rightZ;
+            const overlap = minAllowed - dist + 1.6;
+            const baseDmg = obs.kind === 'pier' ? 52 : obs.kind === 'tug' || obs.kind === 'pilot' ? 42 : 36;
+            this.applyHullBreach(
+              baseDmg * speedRatio + 16,
+              nx,
+              nz,
+              overlap,
+              (px + obs.x) * 0.5,
+              (pz + obs.z) * 0.5,
+              speedRatio,
+              obs.kind === 'pier' ? 28 : 20,
+              p === 0,
+              obs.label,
+              lateral,
+            );
+            return;
+          }
+        }
+      }
+
+      const boxObs = this.harbor.getBoxObstacles();
+      for (let i = 0; i < boxObs.length; i++) {
+        const box = boxObs[i];
+        if (this.obstacleCooldowns.has(box.id)) continue;
+
+        for (let p = 0; p < HULL_CHECK_POINTS.length; p++) {
+          const hp = HULL_CHECK_POINTS[p];
+          const px = this.shipX + fwdX * -hp.zLocal;
+          const pz = this.shipZ + fwdZ * -hp.zLocal;
+          const cx = THREE.MathUtils.clamp(px, box.minX, box.maxX);
+          const cz = THREE.MathUtils.clamp(pz, box.minZ, box.maxZ);
+          const vx = px - cx;
+          const vz = pz - cz;
+          const dist = Math.hypot(vx, vz);
+          if (dist < hp.radius) {
+            this.obstacleCooldowns.set(box.id, 1.65);
+            const nx = dist > 0.001 ? vx / dist : -1;
+            const nz = dist > 0.001 ? vz / dist : 0;
+            const overlap = hp.radius - dist + 1.8;
+            this.applyHullBreach(
+              44 * speedRatio + 18,
+              nx,
+              nz,
+              overlap,
+              cx,
+              cz,
+              speedRatio,
+              24,
+              p === 0,
+              box.label,
+              1,
+            );
+            return;
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // B. Titanic's Own Lowered / Floating Lifeboats During Flooding
+    // -----------------------------------------------------------------------
+    this.ship.crewAndLifeboats.getFloatingLifeboats(this.floatingBoatHazards);
+    for (let i = 0; i < this.floatingBoatHazards.length; i++) {
+      const fb = this.floatingBoatHazards[i];
+      const key = `ship_lb_${fb.index}`;
+      if (this.obstacleCooldowns.has(key)) continue;
+      for (let p = 0; p < HULL_CHECK_POINTS.length; p++) {
+        const hp = HULL_CHECK_POINTS[p];
+        const px = this.shipX + fwdX * -hp.zLocal;
+        const pz = this.shipZ + fwdZ * -hp.zLocal;
+        const vx = px - fb.x;
+        const vz = pz - fb.z;
+        const dist = Math.hypot(vx, vz);
+        if (dist < fb.radius + hp.radius) {
+          this.obstacleCooldowns.set(key, 1.8);
+          const nx = dist > 0.001 ? vx / dist : -rightX;
+          const nz = dist > 0.001 ? vz / dist : -rightZ;
+          this.applyHullBreach(
+            34 * speedRatio + 14,
+            nx,
+            nz,
+            fb.radius + hp.radius - dist + 1.4,
+            (px + fb.x) * 0.5,
+            (pz + fb.z) * 0.5,
+            speedRatio,
+            18,
+            p === 0,
+            'FLOATING LIFEBOAT',
+            1,
+          );
+          return;
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // B2. Royal Navy Escort Warships & Surfaced U-Boat Submarines
+    // -----------------------------------------------------------------------
+    const warshipEntries = [
+      { id: 'escort_warship', wx: this.warshipX, wz: this.warshipZ, wh: this.warshipHeadingRad },
+      { id: 'escort_warship_2', wx: this.warship2X, wz: this.warship2Z, wh: this.warship2HeadingRad },
+    ];
+    for (let ew = 0; ew < warshipEntries.length; ew++) {
+      const we = warshipEntries[ew];
+      if (this.obstacleCooldowns.has(we.id)) continue;
+      const wFwdX = Math.sin(we.wh);
+      const wFwdZ = -Math.cos(we.wh);
+      for (let wi = 0; wi < WARSHIP_HULL_POINTS.length; wi++) {
+        const wp = WARSHIP_HULL_POINTS[wi];
+        const wx = we.wx + wFwdX * -wp.zLocal;
+        const wz = we.wz + wFwdZ * -wp.zLocal;
+        for (let p = 0; p < HULL_CHECK_POINTS.length; p++) {
+          const hp = HULL_CHECK_POINTS[p];
+          const px = this.shipX + fwdX * -hp.zLocal;
+          const pz = this.shipZ + fwdZ * -hp.zLocal;
+          const vx = px - wx;
+          const vz = pz - wz;
+          const dist = Math.hypot(vx, vz);
+          const minAllowed = wp.radius + hp.radius;
+          if (dist < minAllowed) {
+            this.obstacleCooldowns.set(we.id, 1.85);
+            const nx = dist > 0.001 ? vx / dist : -rightX;
+            const nz = dist > 0.001 ? vz / dist : -rightZ;
+            const lat = (wx - this.shipX) * rightX + (wz - this.shipZ) * rightZ;
+            this.applyHullBreach(
+              46 * speedRatio + 18,
+              nx,
+              nz,
+              minAllowed - dist + 2.0,
+              (px + wx) * 0.5,
+              (pz + wz) * 0.5,
+              speedRatio,
+              26,
+              p === 0,
+              'ROYAL NAVY ESCORT WARSHIP',
+              lat,
+            );
+            return;
+          }
+        }
+      }
+    }
+
+    for (let si = 0; si < this.submarines.length; si++) {
+      const sub = this.submarines[si];
+      if (sub.state !== 'hunting' || sub.diveY < -1.5) continue;
+      const key = `uboat_${sub.id}`;
+      if (this.obstacleCooldowns.has(key)) continue;
+      for (let p = 0; p < HULL_CHECK_POINTS.length; p++) {
+        const hp = HULL_CHECK_POINTS[p];
+        const px = this.shipX + fwdX * -hp.zLocal;
+        const pz = this.shipZ + fwdZ * -hp.zLocal;
+        const vx = px - sub.x;
+        const vz = pz - sub.z;
+        const dist = Math.hypot(vx, vz);
+        const minAllowed = 14 + hp.radius;
+        if (dist < minAllowed) {
+          this.obstacleCooldowns.set(key, 1.8);
+          const nx = dist > 0.001 ? vx / dist : -rightX;
+          const nz = dist > 0.001 ? vz / dist : -rightZ;
+          const lat = (sub.x - this.shipX) * rightX + (sub.z - this.shipZ) * rightZ;
+          this.applyHullBreach(
+            38 * speedRatio + 15,
+            nx,
+            nz,
+            minAllowed - dist + 1.8,
+            (px + sub.x) * 0.5,
+            (pz + sub.z) * 0.5,
+            speedRatio,
+            18,
+            p === 0,
+            `HOSTILE U-BOAT ${sub.label}`,
+            lat,
+          );
+          return;
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // C. Icebergs (Lookout Bell, Hull Breach & Near-Miss Bonus)
+    // -----------------------------------------------------------------------
     for (const berg of this.icebergs) {
       const dx = berg.x - this.shipX;
       const dz = berg.z - this.shipZ;
@@ -2028,6 +3767,7 @@ export class TitanicEngine {
       if (ahead > 80 && ahead < 260 && Math.abs(lateral) < berg.collisionRadius + 18) {
         if (ahead < closestWarningDist) {
           closestWarningDist = ahead;
+          closestHazardSide = Math.abs(lateral) < 6 ? 0 : lateral < 0 ? -1 : 1;
           closestWarningText =
             Math.abs(lateral) < 9
               ? 'ICEBERG DEAD AHEAD'
@@ -2064,37 +3804,22 @@ export class TitanicEngine {
 
         if (hit) {
           berg.hitCooldown = 1.65;
-          berg.nearMissAwarded = true; // no near-miss bonus after hitting
-          this.combo = 1;
-
-          const speedRatio = Math.max(0.25, Math.abs(this.speedKnots) / 22);
-          const rawDmg = isBowRam ? 38 * speedRatio + 10 : 18 * speedRatio + 7;
-          this.hullIntegrity = Math.max(0, this.hullIntegrity - Math.round(rawDmg));
-
-          // Physical bounce/deflection, list side & speed loss
+          berg.nearMissAwarded = true;
           const pushSide = lateral >= 0 ? -1 : 1;
-          this.listDirection = lateral >= 0 ? 1 : -1;
-          this.headingRad += pushSide * (isBowRam ? 0.08 : 0.14);
-          this.shipX += rightX * pushSide * 2.5;
-          this.shipZ += rightZ * pushSide * 2.5;
-          this.speedKnots *= isBowRam ? 0.35 : 0.65;
-
-          // Immediate water surge into breached compartments
-          this.floodingPct = Math.min(100, this.floodingPct + (isBowRam ? 22 : 10));
-
-          // Juice: hitstop, camera shake, ice shatter, flash, audio
-          this.hitstopTimer = isBowRam ? 0.065 : 0.042;
-          this.shakeIntensity = isBowRam ? 1.0 : 0.65;
-          this.damageFlashTimer = 0.45;
-          this.onDamageFlash(1.0);
-          this.particles.burstIceImpact(hitPtX, 3.5, hitPtZ, isBowRam ? 46 : 28);
-          this.sound.playCollisionImpact(speedRatio);
-
-          this.eventText = isBowRam
-            ? 'BOW BREACHED — WATER POURING IN'
-            : 'HULL TORN — FORWARD FLOODING';
-          this.eventTimer = 2.6;
-          this.emitTelemetry();
+          const rawDmg = isBowRam ? 44 * speedRatio + 16 : 30 * speedRatio + 12;
+          this.applyHullBreach(
+            rawDmg,
+            rightX * pushSide,
+            rightZ * pushSide,
+            2.6,
+            hitPtX,
+            hitPtZ,
+            speedRatio,
+            isBowRam ? 24 : 14,
+            isBowRam,
+            'NORTH ATLANTIC ICEBERG',
+            lateral,
+          );
           continue;
         }
       }
@@ -2116,12 +3841,12 @@ export class TitanicEngine {
       }
     }
 
-    void dt;
+    this.closestHazardSide = closestHazardSide;
     this.icebergWarning = closestWarningText;
   }
 
   // =========================================================================
-  // CAMERA RIG (Title Harbor Sweep + Free 360° Orbit + Wheelhouse Helm)
+  // CAMERA RIG (Title Harbor Sweep + Free 360° Orbit + Wheelhouse & Interior Decks)
   // =========================================================================
   private updateTitleCamera(): void {
     // Graceful sunlit harbor vista from port-bow water framing Titanic & Berth 44 terminal
@@ -2136,11 +3861,14 @@ export class TitanicEngine {
 
   private updateCamera(dt: number): void {
     const spec = VESSEL_SPOTS[this.focusSpotIndex];
+    const targetX = spec.localTarget[0] + this.interiorWalkOffset.x;
+    const targetY = spec.localTarget[1] + this.interiorWalkOffset.y;
+    const targetZ = spec.localTarget[2] + this.interiorWalkOffset.z;
 
     // Smoothly damp focus position & spherical orbit coordinates
-    this.camFocusLocal.x = THREE.MathUtils.damp(this.camFocusLocal.x, spec.localTarget[0], 6, dt);
-    this.camFocusLocal.y = THREE.MathUtils.damp(this.camFocusLocal.y, spec.localTarget[1], 6, dt);
-    this.camFocusLocal.z = THREE.MathUtils.damp(this.camFocusLocal.z, spec.localTarget[2], 6, dt);
+    this.camFocusLocal.x = THREE.MathUtils.damp(this.camFocusLocal.x, targetX, 7, dt);
+    this.camFocusLocal.y = THREE.MathUtils.damp(this.camFocusLocal.y, targetY, 7, dt);
+    this.camFocusLocal.z = THREE.MathUtils.damp(this.camFocusLocal.z, targetZ, 7, dt);
     this.orbitYaw = THREE.MathUtils.damp(this.orbitYaw, this.targetOrbitYaw, 7, dt);
     this.orbitPitch = THREE.MathUtils.damp(this.orbitPitch, this.targetOrbitPitch, 7, dt);
     this.orbitDistance = THREE.MathUtils.damp(this.orbitDistance, this.targetOrbitDistance, 7, dt);
@@ -2158,7 +3886,7 @@ export class TitanicEngine {
       _vFocusLocal.z = THREE.MathUtils.lerp(62, 118, panT);
     }
 
-    const useSternHalf = spec.id === 'stern';
+    const useSternHalf = spec.id === 'stern' || spec.id === 'engine';
     const halfGroup = useSternHalf ? this.ship.sternGroup : this.ship.bowGroup;
     const halfY = halfGroup.position.y;
     const halfPitch = halfGroup.rotation.x;
@@ -2191,13 +3919,35 @@ export class TitanicEngine {
     _vFwd.set(Math.sin(this.headingRad), 0, -Math.cos(this.headingRad));
     _vRight.set(Math.cos(this.headingRad), 0, Math.sin(this.headingRad));
 
+    const focusSub =
+      this.submarines.find((s) => s.state === 'hunting' || s.state === 'sinking') ||
+      this.submarines[0];
+
     if (
       (this.phase === 'aftermath' || this.phase === 'gameover') &&
-      this.focusCarpathia &&
+      this.aftermathFocus === 'carpathia' &&
       this.carpathia.root.visible
     ) {
       _vFocusWorld.copy(this.carpathia.root.position);
       _vFocusWorld.y = 7.5;
+    } else if (
+      (((this.phase === 'aftermath' || this.phase === 'gameover') &&
+        this.aftermathFocus === 'submarines') ||
+        spec.id === 'submarine') &&
+      focusSub &&
+      focusSub.rig.root.visible
+    ) {
+      _vFwd.set(Math.sin(focusSub.headingRad), 0, -Math.cos(focusSub.headingRad));
+      _vRight.set(Math.cos(focusSub.headingRad), 0, Math.sin(focusSub.headingRad));
+      _vFocusWorld.set(focusSub.x, Math.max(0.5, focusSub.diveY + 3.2), focusSub.z);
+    } else if (
+      ((this.phase === 'aftermath' || this.phase === 'gameover') &&
+        this.aftermathFocus === 'warship') ||
+      spec.id === 'warship'
+    ) {
+      _vFwd.set(Math.sin(this.warshipHeadingRad), 0, -Math.cos(this.warshipHeadingRad));
+      _vRight.set(Math.cos(this.warshipHeadingRad), 0, Math.sin(this.warshipHeadingRad));
+      _vFocusWorld.set(this.warshipX, this.warship.root.position.y + 9.5, this.warshipZ);
     } else {
       _vFocusWorld
         .set(this.shipX, worldY, this.shipZ)
@@ -2219,8 +3969,9 @@ export class TitanicEngine {
 
     _vCamPos.copy(_vFocusWorld).addScaledVector(_vLookDir, -this.orbitDistance);
 
-    // Keep exterior cruising/aftermath camera above waves, while allowing cockpit & sinking spots to ride underwater
-    const isInterior = spec.id === 'wheelhouse' && this.orbitDistance < 2.2;
+    // Keep exterior cruising/aftermath camera above waves, while allowing cockpit, interior decks & sinking spots underwater
+    const isInterior =
+      (spec.id === 'wheelhouse' || spec.category === 'interior') && this.orbitDistance < 12;
     const allowUnderwater =
       isInterior ||
       (this.phase === 'sinking' && !isOverviewShip);
@@ -2243,7 +3994,7 @@ export class TitanicEngine {
     this.camera.position.copy(_vCamPos);
     this.camera.lookAt(_vCamTarget);
 
-    // Subtle ship roll feel when standing inside wheelhouse
+    // Subtle ship roll feel when standing inside wheelhouse or interior decks
     const rollInfluence = isInterior ? 0.55 : 0.08;
     this.camera.rotation.z += this.rollAngle * rollInfluence;
   }
@@ -2271,21 +4022,20 @@ export class TitanicEngine {
           ? this.searchlightCooldown / this.searchlightMaxCooldown
           : 0;
     const spot = VESSEL_SPOTS[this.focusSpotIndex];
-    const p = this.timeSkipProgress;
-    const timeSkipDateLabel =
-      p < 0.25
-        ? 'APRIL 10, 1912 · ENGLISH CHANNEL · DEPARTING SOUTHAMPTON'
-        : p < 0.5
-          ? 'APRIL 11, 1912 · QUEENSTOWN, IRELAND · BOUND WESTWARD'
-          : p < 0.78
-            ? 'APRIL 12–13, 1912 · NORTH ATLANTIC · 21 KNOTS'
-            : 'APRIL 14, 1912 · 11:39 PM · APPROACHING ICE ALLEY';
+    const inHarborZone = this.nightMix < 0.35;
+    const zoneLabel =
+      this.nightMix < 0.15
+        ? 'SOUTHAMPTON BERTH 44 & CHANNEL'
+        : this.nightMix < 0.72
+          ? 'ENGLISH CHANNEL · DUSK PASSAGE'
+          : 'APRIL 14 NIGHT · ICE ALLEY';
 
     this.onTelemetry({
       phase: this.phase,
       cameraMode: this.cameraMode,
       focusSpotId: spot.id,
       focusSpotLabel: spot.label,
+      focusSpotCategory: spot.category,
       headingDeg,
       rudderDeg: Math.round(this.rudderDeg),
       speedKnots: Math.round(this.speedKnots),
@@ -2304,12 +4054,15 @@ export class TitanicEngine {
       carpathiaDistanceM: this.carpathiaDistanceM,
       survivorsRescued: this.survivorsRescued,
       boatsRecovered: this.boatsRecovered,
-      focusCarpathia: this.focusCarpathia,
-      harborChapterIndex: this.harborChapterIndex,
-      harborProgress: this.harborProgress,
-      harborAutoPlay: this.harborAutoPlay,
-      timeSkipProgress: this.timeSkipProgress,
-      timeSkipDateLabel: timeSkipDateLabel,
+      warshipRescuing: this.warshipRescuing,
+      warshipSurvivors: this.warshipSurvivors,
+      warshipBoatsRecovered: this.warshipBoatsRecovered,
+      activeSubmarines: this.submarines.filter((s) => s.state === 'hunting' || s.state === 'sinking').length,
+      submarinesSunk: this.submarinesSunk,
+      focusCarpathia: this.aftermathFocus === 'carpathia',
+      aftermathFocus: this.aftermathFocus,
+      inHarborZone,
+      zoneLabel,
       score: Math.round(this.score),
       bestScore: Math.max(this.bestScore, Math.round(this.score)),
       nearMissCount: this.nearMissCount,
@@ -2318,6 +4071,8 @@ export class TitanicEngine {
       searchlightCooldownPct: cooldownPct,
       icebergWarning: this.icebergWarning,
       lastEventText: this.eventText,
+      autopilotEnabled: this.autopilotEnabled,
+      bowPanicActive: this.bowPanicActive,
       endlessMode: this.endlessMode,
       isMuted: this.sound.isMuted(),
     });
@@ -2331,6 +4086,13 @@ export class TitanicEngine {
     this.sound.dispose();
     this.ship.dispose();
     this.carpathia.dispose();
+    this.warship.dispose();
+    this.warship2.dispose();
+    for (const sub of this.submarines) {
+      sub.rig.dispose();
+    }
+    this.projectileMesh.geometry.dispose();
+    (this.projectileMesh.material as THREE.Material).dispose();
     this.harbor.dispose();
     this.oceanAndSky.dispose();
     this.iceFactory.dispose();

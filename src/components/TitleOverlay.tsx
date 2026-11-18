@@ -3,13 +3,13 @@ import React from 'react';
 interface TitleOverlayProps {
   bestScore: number;
   onStart: () => void;
-  onSkipToNight: () => void;
+  onStartNight: () => void;
 }
 
 export const TitleOverlay: React.FC<TitleOverlayProps> = ({
   bestScore,
   onStart,
-  onSkipToNight,
+  onStartNight,
 }) => {
   return (
     <div className="fixed inset-0 z-20 flex flex-col justify-between pointer-events-none px-6 py-8 md:px-12 md:py-10">
@@ -26,7 +26,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
       <div className="flex items-start justify-between">
         <div className="bg-[#070e18]/88 border border-[#c99c43]/45 px-4 py-2 rounded-sm">
           <span className="text-[11px] tracking-[0.22em] uppercase text-[#d8b467] font-semibold">
-            SOUTHAMPTON BERTH 44 · APRIL 10, 1912
+            SOUTHAMPTON BERTH 44 · DIRECT HELM COMMAND
           </span>
         </div>
 
@@ -86,8 +86,8 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
             <line x1="90" y1="114" x2="430" y2="114" stroke="#c99c43" strokeWidth="1" opacity="0.55" />
           </svg>
 
-          <p className="text-sm md:text-base text-[#c5d4e6] max-w-md mx-auto mb-6 leading-relaxed">
-            Cast off from Southampton Harbor aboard the 269-meter Olympic-class liner, inspect every deck and bridge instrument, then take the helm on the fateful night of April 14.
+          <p className="text-sm md:text-base text-[#c5d4e6] max-w-lg mx-auto mb-6 leading-relaxed">
+            Take immediate helm control right from Southampton Berth 44. Navigate past harbor tugs, pilot cutters, lifeboats, and channel piers out to the North Atlantic—and explore accessible interior decks from the Grand Staircase to the Engine Room.
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-3">
@@ -96,14 +96,14 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
               onClick={onStart}
               className="inline-flex items-center justify-center px-8 py-3.5 bg-[#c99c43] hover:bg-[#dcb15a] active:bg-[#b58934] text-[#08101c] font-bold tracking-[0.16em] uppercase text-sm rounded-sm transition-colors cursor-pointer shadow-lg whitespace-nowrap shrink-0"
             >
-              BEGIN VOYAGE
+              TAKE THE HELM AT DOCK
             </button>
             <button
               type="button"
-              onClick={onSkipToNight}
+              onClick={onStartNight}
               className="inline-flex items-center justify-center px-5 py-3.5 bg-[#0b1626] hover:bg-[#14253d] border border-[#c99c43]/45 text-[#e6c373] font-semibold tracking-[0.14em] uppercase text-xs rounded-sm transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              SKIP TO APRIL 14 NIGHT
+              APRIL 14 NIGHT WATCH
             </button>
           </div>
         </div>
@@ -112,7 +112,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
       {/* Control Hint Line */}
       <div className="flex justify-center">
         <div className="bg-[#070e18]/88 border border-[#c99c43]/35 px-5 py-2 rounded-sm text-xs tracking-[0.12em] uppercase text-[#c7d6e6] text-center">
-          A / D Steer Helm &nbsp;·&nbsp; W / X Telegraph &nbsp;·&nbsp; Drag / Scroll View Ship &nbsp;·&nbsp; S Focus Spot &nbsp;·&nbsp; Space Searchlight
+          A Autopilot &nbsp;·&nbsp; ← / → Steer Helm &nbsp;·&nbsp; W / X Telegraph &nbsp;·&nbsp; I / J / K / L Walk Interior Decks &nbsp;·&nbsp; S Switch Deck
         </div>
       </div>
     </div>

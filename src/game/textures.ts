@@ -18,6 +18,9 @@ export interface ProceduralTextureSet {
   hullNameplateCarpathia: THREE.CanvasTexture;
   whiteStarPennant: THREE.CanvasTexture;
   redEnsignFlag: THREE.CanvasTexture;
+  whiteEnsignFlag: THREE.CanvasTexture;
+  interiorMarbleAlbedo: THREE.CanvasTexture;
+  interiorPanelAlbedo: THREE.CanvasTexture;
   dispose: () => void;
 }
 
@@ -175,10 +178,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   const teakDeckAlbedo = configureColorTexture(teakCanvas, maxAnisotropy, 4, 14);
   const teakDeckNormal = heightCanvasToNormalTexture(teakHCanvas, 2.4, maxAnisotropy, 4, 14);
 
-  // 3. Riveted Steel Hull Plates (Albedo + Normal Map)
+  // 3. Crisp Riveted Steel Hull Plates (Albedo + Normal Map)
   const [hullCanvas, hullCtx] = makeCanvas(512, 512);
   const [hullHCanvas, hullHCtx] = makeCanvas(512, 512);
-  hullCtx.fillStyle = '#12171f';
+  hullCtx.fillStyle = '#141b24';
   hullCtx.fillRect(0, 0, 512, 512);
   hullHCtx.fillStyle = '#808080';
   hullHCtx.fillRect(0, 0, 512, 512);
@@ -186,38 +189,44 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   for (let row = 0; row < 8; row++) {
     const y = row * 64;
     const offset = (row % 2) * 64;
-    hullCtx.fillStyle = row % 2 === 0 ? '#161c26' : '#11161e';
+    hullCtx.fillStyle = row % 2 === 0 ? '#1b2430' : '#131922';
     hullCtx.fillRect(0, y, 512, 62);
-    hullHCtx.fillStyle = row % 2 === 0 ? '#989898' : '#7a7a7a';
+    hullHCtx.fillStyle = row % 2 === 0 ? '#a4a4a4' : '#767676';
     hullHCtx.fillRect(0, y, 512, 62);
 
-    // Plate lap seam
-    hullCtx.fillStyle = '#090c11';
-    hullCtx.fillRect(0, y + 62, 512, 2);
-    hullHCtx.fillStyle = '#303030';
-    hullHCtx.fillRect(0, y + 62, 512, 2);
-
-    // Vertical plate joints
-    for (let vx = offset; vx < 512; vx += 128) {
-      hullCtx.fillStyle = '#0b0f15';
-      hullCtx.fillRect(vx, y, 2, 64);
-      hullHCtx.fillStyle = '#383838';
-      hullHCtx.fillRect(vx, y, 2, 64);
+    // Subtle salt/brushing horizontal micro-strakes
+    for (let s = 0; s < 5; s++) {
+      hullCtx.fillStyle = s % 2 === 0 ? 'rgba(255,255,255,0.035)' : 'rgba(0,0,0,0.08)';
+      hullCtx.fillRect(0, y + 10 + s * 10, 512, 2);
     }
 
-    // Raised rivet rows
-    for (let r = 8; r < 512; r += 16) {
-      hullCtx.fillStyle = '#252e3c';
-      hullCtx.fillRect(r, y + 4, 3, 3);
-      hullCtx.fillRect(r, y + 55, 3, 3);
+    // Deep plate lap seam
+    hullCtx.fillStyle = '#070a0e';
+    hullCtx.fillRect(0, y + 61, 512, 3);
+    hullHCtx.fillStyle = '#242424';
+    hullHCtx.fillRect(0, y + 61, 512, 3);
 
-      hullHCtx.fillStyle = '#d4d4d4';
+    // Vertical plate butt joints
+    for (let vx = offset; vx < 512; vx += 128) {
+      hullCtx.fillStyle = '#090d13';
+      hullCtx.fillRect(vx, y, 2.5, 64);
+      hullHCtx.fillStyle = '#2c2c2c';
+      hullHCtx.fillRect(vx, y, 2.5, 64);
+    }
+
+    // Crisp raised double-rivet rows
+    for (let r = 6; r < 512; r += 12) {
+      hullCtx.fillStyle = '#2d394a';
+      hullCtx.fillRect(r, y + 4, 3, 3);
+      hullCtx.fillRect(r, y + 54, 3, 3);
+
+      hullHCtx.fillStyle = '#e5e5e5';
       hullHCtx.fillRect(r, y + 4, 3, 3);
-      hullHCtx.fillRect(r, y + 55, 3, 3);
+      hullHCtx.fillRect(r, y + 54, 3, 3);
     }
   }
-  const steelHullAlbedo = configureColorTexture(hullCanvas, maxAnisotropy, 10, 3);
-  const steelHullNormal = heightCanvasToNormalTexture(hullHCanvas, 2.8, maxAnisotropy, 10, 3);
+  const steelHullAlbedo = configureColorTexture(hullCanvas, maxAnisotropy, 12, 3.5);
+  const steelHullNormal = heightCanvasToNormalTexture(hullHCanvas, 3.3, maxAnisotropy, 12, 3.5);
 
   // 4. Compass Card Dial
   const [compCanvas, compCtx] = makeCanvas(512, 512);
@@ -505,6 +514,89 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   redEnsignFlag.wrapS = THREE.ClampToEdgeWrapping;
   redEnsignFlag.wrapT = THREE.ClampToEdgeWrapping;
 
+  // 11B. Royal Navy White Ensign (White field, Red St. George Cross, Union Jack Canton)
+  const [wensCanvas, wensCtx] = makeCanvas(256, 128);
+  wensCtx.fillStyle = '#f4f6fa';
+  wensCtx.fillRect(0, 0, 256, 128);
+  // St George's Cross
+  wensCtx.fillStyle = '#b91c1c';
+  wensCtx.fillRect(116, 0, 24, 128);
+  wensCtx.fillRect(0, 52, 256, 24);
+  // Union Flag in upper-left canton
+  wensCtx.fillStyle = '#1e3a8a';
+  wensCtx.fillRect(0, 0, 116, 52);
+  wensCtx.strokeStyle = '#f8fafc';
+  wensCtx.lineWidth = 9;
+  wensCtx.beginPath();
+  wensCtx.moveTo(0, 0);
+  wensCtx.lineTo(116, 52);
+  wensCtx.moveTo(116, 0);
+  wensCtx.lineTo(0, 52);
+  wensCtx.stroke();
+  wensCtx.fillStyle = '#f8fafc';
+  wensCtx.fillRect(49, 0, 18, 52);
+  wensCtx.fillRect(0, 17, 116, 18);
+  wensCtx.fillStyle = '#dc2626';
+  wensCtx.fillRect(53, 0, 10, 52);
+  wensCtx.fillRect(0, 21, 116, 10);
+  const whiteEnsignFlag = configureColorTexture(wensCanvas, maxAnisotropy, 1, 1);
+  whiteEnsignFlag.wrapS = THREE.ClampToEdgeWrapping;
+  whiteEnsignFlag.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 12. First-Class Checkered Parquet / Linoleum Marble Floor (Reception & Dining Saloon)
+  const [marbCanvas, marbCtx] = makeCanvas(512, 512);
+  const tile = 64;
+  for (let ty = 0; ty < 8; ty++) {
+    for (let tx = 0; tx < 8; tx++) {
+      const dark = (tx + ty) % 2 === 0;
+      marbCtx.fillStyle = dark ? '#20242c' : '#e7ddc6';
+      marbCtx.fillRect(tx * tile, ty * tile, tile, tile);
+      // Subtle marble veining inside each square
+      marbCtx.strokeStyle = dark ? 'rgba(130, 145, 165, 0.14)' : 'rgba(155, 132, 95, 0.18)';
+      marbCtx.lineWidth = 1.5;
+      marbCtx.beginPath();
+      marbCtx.moveTo(tx * tile + 6, ty * tile + 14);
+      marbCtx.bezierCurveTo(
+        tx * tile + 24,
+        ty * tile + 30,
+        tx * tile + 40,
+        ty * tile + 18,
+        tx * tile + tile - 6,
+        ty * tile + tile - 10,
+      );
+      marbCtx.stroke();
+      // Gold hairline border
+      marbCtx.strokeStyle = 'rgba(164, 126, 62, 0.25)';
+      marbCtx.lineWidth = 1;
+      marbCtx.strokeRect(tx * tile + 0.5, ty * tile + 0.5, tile - 1, tile - 1);
+    }
+  }
+  const interiorMarbleAlbedo = configureColorTexture(marbCanvas, maxAnisotropy, 6, 8);
+
+  // 13. Edwardian Georgian Cream & Oak Wainscot Interior Wall Paneling
+  const [panCanvas, panCtx] = makeCanvas(512, 512);
+  panCtx.fillStyle = '#eae1cc';
+  panCtx.fillRect(0, 0, 512, 512);
+  // Lower oak dado rail & wainscoting
+  panCtx.fillStyle = '#6e4526';
+  panCtx.fillRect(0, 355, 512, 157);
+  panCtx.fillStyle = '#c49b4d';
+  panCtx.fillRect(0, 350, 512, 7);
+  // Carved recessed molding frames
+  for (let px = 18; px < 512; px += 128) {
+    panCtx.strokeStyle = '#c8b896';
+    panCtx.lineWidth = 5;
+    panCtx.strokeRect(px, 32, 92, 290);
+    panCtx.strokeStyle = '#9c7c46';
+    panCtx.lineWidth = 2;
+    panCtx.strokeRect(px + 10, 44, 72, 266);
+    // Wainscot oak inset
+    panCtx.strokeStyle = '#472914';
+    panCtx.lineWidth = 4;
+    panCtx.strokeRect(px, 376, 92, 114);
+  }
+  const interiorPanelAlbedo = configureColorTexture(panCanvas, maxAnisotropy, 4, 1);
+
   return {
     mahoganyAlbedo,
     mahoganyRoughness,
@@ -523,6 +615,9 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     hullNameplateCarpathia,
     whiteStarPennant,
     redEnsignFlag,
+    whiteEnsignFlag,
+    interiorMarbleAlbedo,
+    interiorPanelAlbedo,
     dispose: () => {
       mahoganyAlbedo.dispose();
       mahoganyRoughness.dispose();
@@ -541,6 +636,9 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       hullNameplateCarpathia.dispose();
       whiteStarPennant.dispose();
       redEnsignFlag.dispose();
+      whiteEnsignFlag.dispose();
+      interiorMarbleAlbedo.dispose();
+      interiorPanelAlbedo.dispose();
     },
   };
 }
