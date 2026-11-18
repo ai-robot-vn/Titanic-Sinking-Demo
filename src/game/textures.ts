@@ -13,6 +13,10 @@ export interface ProceduralTextureSet {
   iceAlbedo: THREE.CanvasTexture;
   iceNormal: THREE.DataTexture;
   sprayParticle: THREE.CanvasTexture;
+  hullNameplateBow: THREE.CanvasTexture;
+  hullNameplateStern: THREE.CanvasTexture;
+  whiteStarPennant: THREE.CanvasTexture;
+  redEnsignFlag: THREE.CanvasTexture;
   dispose: () => void;
 }
 
@@ -402,6 +406,90 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   sprayParticle.wrapS = THREE.ClampToEdgeWrapping;
   sprayParticle.wrapT = THREE.ClampToEdgeWrapping;
 
+  // 9. Hull Bow Nameplate ("TITANIC") & Stern Nameplate ("TITANIC · LIVERPOOL")
+  const [bowNameCanvas, bowNameCtx] = makeCanvas(512, 128);
+  bowNameCtx.clearRect(0, 0, 512, 128);
+  bowNameCtx.fillStyle = '#e7bf62';
+  bowNameCtx.strokeStyle = '#6c4d14';
+  bowNameCtx.lineWidth = 3;
+  bowNameCtx.font = 'bold 74px Georgia, "Times New Roman", serif';
+  bowNameCtx.textAlign = 'center';
+  bowNameCtx.textBaseline = 'middle';
+  bowNameCtx.strokeText('T I T A N I C', 256, 66);
+  bowNameCtx.fillText('T I T A N I C', 256, 66);
+  const hullNameplateBow = configureColorTexture(bowNameCanvas, maxAnisotropy, 1, 1);
+  hullNameplateBow.wrapS = THREE.ClampToEdgeWrapping;
+  hullNameplateBow.wrapT = THREE.ClampToEdgeWrapping;
+
+  const [sternNameCanvas, sternNameCtx] = makeCanvas(512, 160);
+  sternNameCtx.clearRect(0, 0, 512, 160);
+  sternNameCtx.fillStyle = '#e7bf62';
+  sternNameCtx.strokeStyle = '#6c4d14';
+  sternNameCtx.lineWidth = 2.5;
+  sternNameCtx.font = 'bold 58px Georgia, "Times New Roman", serif';
+  sternNameCtx.textAlign = 'center';
+  sternNameCtx.textBaseline = 'middle';
+  sternNameCtx.strokeText('T I T A N I C', 256, 56);
+  sternNameCtx.fillText('T I T A N I C', 256, 56);
+  sternNameCtx.font = 'bold 34px Georgia, "Times New Roman", serif';
+  sternNameCtx.strokeText('L I V E R P O O L', 256, 118);
+  sternNameCtx.fillText('L I V E R P O O L', 256, 118);
+  const hullNameplateStern = configureColorTexture(sternNameCanvas, maxAnisotropy, 1, 1);
+  hullNameplateStern.wrapS = THREE.ClampToEdgeWrapping;
+  hullNameplateStern.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 10. White Star Line Burgee Pennant (Red swallowtail with 5-pointed white star)
+  const [wsCanvas, wsCtx] = makeCanvas(256, 128);
+  wsCtx.clearRect(0, 0, 256, 128);
+  wsCtx.fillStyle = '#b91c1c';
+  wsCtx.beginPath();
+  wsCtx.moveTo(0, 8);
+  wsCtx.lineTo(256, 26);
+  wsCtx.lineTo(192, 64);
+  wsCtx.lineTo(256, 102);
+  wsCtx.lineTo(0, 120);
+  wsCtx.closePath();
+  wsCtx.fill();
+  wsCtx.fillStyle = '#f8fafc';
+  wsCtx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? 32 : 13;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const sx = 88 + Math.cos(a) * r;
+    const sy = 64 + Math.sin(a) * r;
+    if (i === 0) wsCtx.moveTo(sx, sy);
+    else wsCtx.lineTo(sx, sy);
+  }
+  wsCtx.closePath();
+  wsCtx.fill();
+  const whiteStarPennant = configureColorTexture(wsCanvas, maxAnisotropy, 1, 1);
+  whiteStarPennant.wrapS = THREE.ClampToEdgeWrapping;
+  whiteStarPennant.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 11. British Merchant Marine Red Ensign
+  const [ensCanvas, ensCtx] = makeCanvas(256, 128);
+  ensCtx.fillStyle = '#b91c1c';
+  ensCtx.fillRect(0, 0, 256, 128);
+  ensCtx.fillStyle = '#1e3a8a';
+  ensCtx.fillRect(0, 0, 118, 64);
+  ensCtx.strokeStyle = '#f8fafc';
+  ensCtx.lineWidth = 10;
+  ensCtx.beginPath();
+  ensCtx.moveTo(0, 0);
+  ensCtx.lineTo(118, 64);
+  ensCtx.moveTo(118, 0);
+  ensCtx.lineTo(0, 64);
+  ensCtx.stroke();
+  ensCtx.fillStyle = '#f8fafc';
+  ensCtx.fillRect(50, 0, 18, 64);
+  ensCtx.fillRect(0, 23, 118, 18);
+  ensCtx.fillStyle = '#dc2626';
+  ensCtx.fillRect(54, 0, 10, 64);
+  ensCtx.fillRect(0, 27, 118, 10);
+  const redEnsignFlag = configureColorTexture(ensCanvas, maxAnisotropy, 1, 1);
+  redEnsignFlag.wrapS = THREE.ClampToEdgeWrapping;
+  redEnsignFlag.wrapT = THREE.ClampToEdgeWrapping;
+
   return {
     mahoganyAlbedo,
     mahoganyRoughness,
@@ -415,6 +503,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     iceAlbedo,
     iceNormal,
     sprayParticle,
+    hullNameplateBow,
+    hullNameplateStern,
+    whiteStarPennant,
+    redEnsignFlag,
     dispose: () => {
       mahoganyAlbedo.dispose();
       mahoganyRoughness.dispose();
@@ -428,6 +520,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       iceAlbedo.dispose();
       iceNormal.dispose();
       sprayParticle.dispose();
+      hullNameplateBow.dispose();
+      hullNameplateStern.dispose();
+      whiteStarPennant.dispose();
+      redEnsignFlag.dispose();
     },
   };
 }

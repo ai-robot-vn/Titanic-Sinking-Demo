@@ -67,6 +67,7 @@ export default function App() {
     telemetry.phase === 'playing' ||
     telemetry.phase === 'paused' ||
     telemetry.phase === 'sinking' ||
+    telemetry.phase === 'aftermath' ||
     telemetry.phase === 'victory' ||
     telemetry.phase === 'gameover';
 
@@ -118,6 +119,8 @@ export default function App() {
           onTogglePause={() => engineRef.current?.togglePause()}
           onToggleMute={() => engineRef.current?.toggleMute()}
           onSkipSinking={() => engineRef.current?.skipSinking()}
+          onOpenReport={() => engineRef.current?.openVoyageReport()}
+          onRestart={() => engineRef.current?.startGame()}
         />
       )}
 
@@ -126,6 +129,7 @@ export default function App() {
         onRestart={() => engineRef.current?.startGame()}
         onResume={() => engineRef.current?.togglePause()}
         onContinueEndless={() => engineRef.current?.continueEndless()}
+        onObserveAftermath={() => engineRef.current?.closeVoyageReportToAftermath()}
         onReturnTitle={() => engineRef.current?.returnToTitle()}
       />
     </main>

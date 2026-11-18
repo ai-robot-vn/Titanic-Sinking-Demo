@@ -5,6 +5,7 @@ export type GamePhase =
   | 'playing'
   | 'paused'
   | 'sinking'
+  | 'aftermath'
   | 'victory'
   | 'gameover';
 

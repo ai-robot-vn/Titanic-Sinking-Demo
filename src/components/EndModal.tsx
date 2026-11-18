@@ -6,6 +6,7 @@ interface EndModalProps {
   onRestart: () => void;
   onResume: () => void;
   onContinueEndless: () => void;
+  onObserveAftermath: () => void;
   onReturnTitle: () => void;
 }
 
@@ -14,6 +15,7 @@ export const EndModal: React.FC<EndModalProps> = ({
   onRestart,
   onResume,
   onContinueEndless,
+  onObserveAftermath,
   onReturnTitle,
 }) => {
   const { phase } = telemetry;
@@ -32,11 +34,11 @@ export const EndModal: React.FC<EndModalProps> = ({
             ? 'BRIDGE WATCH PAUSED'
             : isVictory
               ? 'OPEN WATER REACHED'
-              : 'LOST IN THE NORTH ATLANTIC'}
+              : 'NORTH ATLANTIC · 41°43′N 49°56′W'}
         </div>
 
         <h2 className="font-maritime-serif text-3xl font-bold text-[#f4ebd2] tracking-wide mb-3">
-          {isPaused ? 'Hold Course' : isVictory ? 'Safe Passage' : 'Titanic Sunk'}
+          {isPaused ? 'Hold Course' : isVictory ? 'Safe Passage' : 'Voyage Log'}
         </h2>
 
         <p className="text-sm text-[#b9cbe0] mb-6 leading-relaxed">
@@ -44,7 +46,7 @@ export const EndModal: React.FC<EndModalProps> = ({
             ? 'Orders are standing by in the wheelhouse.'
             : isVictory
               ? 'You guided RMS Titanic cleanly past the North Atlantic ice barrier with hull integrity intact.'
-              : 'Freezing Atlantic seawater flooded past the watertight bulkheads, dragging the bow beneath the waves.'}
+              : 'Titanic broke amidships and slipped beneath the freezing Atlantic while 16 lifeboats pulled away into the night.'}
         </p>
 
         {/* Voyage Summary Readout */}
@@ -102,6 +104,16 @@ export const EndModal: React.FC<EndModalProps> = ({
           >
             {isPaused ? 'RESTART VOYAGE' : 'SAIL AGAIN [ENTER]'}
           </button>
+
+          {phase === 'gameover' && (
+            <button
+              type="button"
+              onClick={onObserveAftermath}
+              className="w-full py-2.5 bg-[#0e1b2e] hover:bg-[#162944] text-[#e6c373] border border-[#c99c43]/40 font-semibold tracking-[0.15em] uppercase text-[11px] rounded-sm cursor-pointer transition-colors"
+            >
+              RETURN TO OCEAN VIEW
+            </button>
+          )}
 
           <button
             type="button"

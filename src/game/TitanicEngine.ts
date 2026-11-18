@@ -4,7 +4,7 @@ import { SoundEngine } from './audio';
 import { buildSouthamptonHarbor, HarborRig } from './harborBuilder';
 import { IcebergEntity, IcebergFactory } from './icebergBuilder';
 import { createOceanAndSky, OceanAndSkyRig, ParticlePool } from './oceanAndSky';
-import { buildTitanicShip, TitanicShipRig } from './shipBuilder';
+import { buildTitanicShip, BREAK_Z, TitanicShipRig } from './shipBuilder';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import {
   CameraMode,
@@ -119,6 +119,8 @@ export class TitanicEngine {
   private targetOrbitDistance = 0;
   private userAdjustedCameraInSink = false;
   private autoFocusedSinkLifeboats = false;
+  private hasBrokenInTwo = false;
+  private autoFocusedBreakup = false;
   private isPointerDown = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
@@ -248,11 +250,11 @@ export class TitanicEngine {
     this.ship = buildTitanicShip(this.textures, this.isSoftwareGl);
     this.scene.add(this.ship.root);
 
-    // Searchlight SpotLight attached to ship roof
+    // Searchlight SpotLight attached to forward bridge roof (sinks with bow half)
     this.searchSpotLight = new THREE.SpotLight(0xeef8ff, 24, 480, Math.PI / 9, 0.55, 1.1);
     this.searchSpotLight.position.set(0, 16.25, -1.5);
     this.searchSpotLight.target = this.ship.searchlightTarget;
-    this.ship.hullMeshGroup.add(this.searchSpotLight);
+    this.ship.bowContent.add(this.searchSpotLight);
 
     this.iceFactory = new IcebergFactory(this.textures);
     this.particles = new ParticlePool(320);
@@ -339,6 +341,8 @@ export class TitanicEngine {
     this.spawnAccumDist = 0;
     this.userAdjustedCameraInSink = false;
     this.autoFocusedSinkLifeboats = false;
+    this.hasBrokenInTwo = false;
+    this.autoFocusedBreakup = false;
 
     this.harborChapterIndex = 0;
     this.harborProgress = 0;
@@ -348,15 +352,25 @@ export class TitanicEngine {
     this.harbor.root.visible = true;
     this.applyAtmosphere(0);
 
-    this.ship.hullMeshGroup.position.set(0, 0, 0);
-    this.ship.hullMeshGroup.rotation.set(0, 0, 0);
+    this.resetShipRigPose();
     this.ship.setWheelhouseFloodLevel(0);
-    this.ship.crewAndLifeboats.reset(this.ship.hullMeshGroup);
     this.applyHarborChapterCamera(0, true);
 
     this.sound.playSteamWhistle();
     this.sound.playTelegraphBell();
     this.emitTelemetry();
+  }
+
+  private resetShipRigPose(): void {
+    this.ship.hullMeshGroup.visible = true;
+    this.ship.hullMeshGroup.position.set(0, 0, 0);
+    this.ship.hullMeshGroup.rotation.set(0, 0, 0);
+    this.ship.bowGroup.position.set(0, 0, BREAK_Z);
+    this.ship.bowGroup.rotation.set(0, 0, 0);
+    this.ship.sternGroup.position.set(0, 0, BREAK_Z);
+    this.ship.sternGroup.rotation.set(0, 0, 0);
+    this.ship.setBreakupVisual(false, 0);
+    this.ship.crewAndLifeboats.reset();
   }
 
   public setHarborChapter(idx: number): void {
@@ -468,15 +482,15 @@ export class TitanicEngine {
     this.spawnAccumDist = 0;
     this.userAdjustedCameraInSink = false;
     this.autoFocusedSinkLifeboats = false;
+    this.hasBrokenInTwo = false;
+    this.autoFocusedBreakup = false;
 
     this.harbor.root.visible = false;
     this.applyAtmosphere(1.0);
 
-    this.ship.hullMeshGroup.position.set(0, 0, 0);
-    this.ship.hullMeshGroup.rotation.set(0, 0, 0);
+    this.resetShipRigPose();
     this.ship.setPowerLevel(1);
     this.ship.setWheelhouseFloodLevel(0);
-    this.ship.crewAndLifeboats.reset(this.ship.hullMeshGroup);
     this.focusVesselSpot('wheelhouse', false);
 
     this.seedInitialIcebergs();
@@ -508,10 +522,48 @@ export class TitanicEngine {
   public skipSinking(): void {
     if (this.phase === 'sinking') {
       this.sinkProgress = 1;
+      this.hasBrokenInTwo = true;
+      this.ship.setBreakupVisual(true, 0);
+      this.ship.bowGroup.position.y = -72;
+      this.ship.bowGroup.rotation.x = -0.76;
+      this.ship.sternGroup.position.y = -138;
+      this.ship.sternGroup.rotation.x = -1.46;
+      this.ship.setPowerLevel(0);
+      this.ship.hullMeshGroup.visible = false;
+      this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
+        this.simTime,
+        0.016,
+        1.0,
+        this.ship.root,
+      );
+      this.enterAftermath();
+    }
+  }
+
+  public openVoyageReport(): void {
+    if (this.phase === 'aftermath') {
       this.phase = 'gameover';
-      this.saveBestScore();
       this.emitTelemetry();
     }
+  }
+
+  public closeVoyageReportToAftermath(): void {
+    if (this.phase === 'gameover') {
+      this.phase = 'aftermath';
+      this.emitTelemetry();
+    }
+  }
+
+  private enterAftermath(): void {
+    this.phase = 'aftermath';
+    this.ship.hullMeshGroup.visible = false;
+    if (VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse') {
+      this.focusVesselSpot('funnels', false);
+    }
+    this.eventText = 'RMS TITANIC SUBMERGED — 16 LIFEBOATS ADRIFT';
+    this.eventTimer = 5.5;
+    this.saveBestScore();
+    this.emitTelemetry();
   }
 
   public returnToTitle(): void {
@@ -534,12 +586,12 @@ export class TitanicEngine {
     this.lifeboatsLaunched = 0;
     this.userAdjustedCameraInSink = false;
     this.autoFocusedSinkLifeboats = false;
+    this.hasBrokenInTwo = false;
+    this.autoFocusedBreakup = false;
     this.harbor.root.visible = true;
     this.applyAtmosphere(0);
-    this.ship.hullMeshGroup.position.set(0, 0, 0);
-    this.ship.hullMeshGroup.rotation.set(0, 0, 0);
+    this.resetShipRigPose();
     this.ship.setWheelhouseFloodLevel(0);
-    this.ship.crewAndLifeboats.reset(this.ship.hullMeshGroup);
     this.focusVesselSpot('wheelhouse', false);
     this.emitTelemetry();
   }
@@ -666,7 +718,7 @@ export class TitanicEngine {
       return;
     }
 
-    if (this.phase === 'gameover' || this.phase === 'victory') {
+    if (this.phase === 'gameover' || this.phase === 'victory' || this.phase === 'aftermath') {
       if (code === 'Enter') {
         e.preventDefault();
         this.startGame();
@@ -905,6 +957,11 @@ export class TitanicEngine {
       return;
     }
 
+    if (this.phase === 'aftermath') {
+      this.stepAftermathSequence(dt);
+      return;
+    }
+
     if (this.phase === 'victory' || this.phase === 'gameover') {
       this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, 1.2, dt);
       this.shipZ -= this.speedKnots * 1.5 * dt * Math.cos(this.headingRad);
@@ -917,7 +974,6 @@ export class TitanicEngine {
           this.simTime,
           dt,
           1.0,
-          this.ship.hullMeshGroup,
           this.ship.root,
         );
       }
@@ -1098,7 +1154,7 @@ export class TitanicEngine {
     this.rimLight.intensity = THREE.MathUtils.lerp(0.85, 0.72, n);
 
     // Keep ship wheelhouse dials softly lit by day and full warm glow by night
-    if (this.phase !== 'sinking' && this.phase !== 'gameover') {
+    if (this.phase !== 'sinking' && this.phase !== 'aftermath' && this.phase !== 'gameover') {
       this.ship.setPowerLevel(THREE.MathUtils.lerp(0.28, 1.0, THREE.MathUtils.smoothstep(n, 0.25, 0.85)));
     }
   }
@@ -1214,11 +1270,13 @@ export class TitanicEngine {
     this.waterIngressRate = 0;
     this.phase = 'sinking';
     this.sinkProgress = 0;
+    this.hasBrokenInTwo = false;
+    this.autoFocusedBreakup = false;
     this.telegraphIndex = 1; // ALL STOP
     this.heldKeys.clear();
     this.icebergWarning = null;
-    this.eventText = 'WATER OVERWHELMING BULKHEADS — SHIP SINKING';
-    this.eventTimer = 6.0;
+    this.eventText = 'WATER OVERWHELMING BULKHEADS — BOW SUBMERGING';
+    this.eventTimer = 5.5;
     this.groanCooldown = 0.3;
     this.sound.playHullGroan(1.0);
     this.sound.playSteamWhistle();
@@ -1226,31 +1284,118 @@ export class TitanicEngine {
   }
 
   private stepSinkingSequence(dt: number): void {
-    this.sinkProgress = Math.min(1, this.sinkProgress + dt / 17.5);
+    // ~24-second multi-stage dramatic sinking: Bow plunge -> Midships fracture -> Bow dives -> Stern vertical plunge
+    this.sinkProgress = Math.min(1, this.sinkProgress + dt / 24.0);
+    const p = this.sinkProgress;
 
     // Engines stop & forward momentum bleeds off as bow buries into sea
     this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, 0.7, dt);
     const fwdX = Math.sin(this.headingRad);
     const fwdZ = -Math.cos(this.headingRad);
-    const worldSpeed = this.speedKnots * 1.4;
+    const rightX = Math.cos(this.headingRad);
+    const rightZ = Math.sin(this.headingRad);
+    const worldSpeed = this.speedKnots * 1.3;
     this.shipX += fwdX * worldSpeed * dt;
     this.shipZ += fwdZ * worldSpeed * dt;
 
-    // Dramatic bow-down plunge, vertical submergence, and heavy list across the 269.1m hull
-    this.sinkDropY = -2.4 - Math.pow(this.sinkProgress, 1.2) * 56.0;
-    this.sinkPitch = -0.088 - Math.sin(this.sinkProgress * Math.PI * 0.5) * 0.46;
-    this.sinkList = this.listDirection * (0.095 + Math.sin(this.sinkProgress * Math.PI * 0.58) * 0.38);
+    // =========================================================================
+    // STAGE 1 (0.00 -> 0.40): Intact hull plunges bow-first while stern rises
+    // STAGE 2 (0.40): Hull snaps in two at BREAK_Z = 90 between Funnels #3 & #4
+    // STAGE 3 (0.40 -> 0.72): Bow section dives deep; Stern slams back & floods
+    // STAGE 4 (0.72 -> 1.00): Stern rears ~83 deg vertical & sinks completely
+    // =========================================================================
+    if (p < 0.4) {
+      const s1 = p / 0.4;
+      const e1 = s1 * s1 * (3 - 2 * s1);
+      this.sinkPitch = THREE.MathUtils.lerp(-0.088, -0.34, e1);
+      this.sinkDropY = THREE.MathUtils.lerp(-2.2, -26.5, Math.pow(s1, 1.15));
+      this.sinkList = this.listDirection * (0.095 + e1 * 0.065);
+
+      const hingeY = this.sinkDropY - BREAK_Z * Math.sin(this.sinkPitch);
+      this.ship.bowGroup.position.y = hingeY;
+      this.ship.bowGroup.rotation.x = this.sinkPitch;
+      this.ship.sternGroup.position.y = hingeY;
+      this.ship.sternGroup.rotation.x = this.sinkPitch;
+    } else {
+      if (!this.hasBrokenInTwo) {
+        this.hasBrokenInTwo = true;
+        this.ship.setBreakupVisual(true, 1.35);
+        this.sound.playBreakupSnap();
+        this.shakeIntensity = 1.0;
+        this.eventText = 'HULL FRACTURING AT MIDSHIPS — TITANIC BREAKS IN TWO';
+        this.eventTimer = 5.0;
+
+        // Explosive burst of steam, sparks & torn spray at the fracture plane (z = BREAK_Z)
+        const breakWorldX = this.shipX - fwdX * BREAK_Z;
+        const breakWorldZ = this.shipZ - fwdZ * BREAK_Z;
+        for (let i = 0; i < 42; i++) {
+          const isSpark = i < 14;
+          this.particles.emit(
+            breakWorldX + (Math.random() - 0.5) * 18,
+            4.5 + Math.random() * 14,
+            breakWorldZ + (Math.random() - 0.5) * 18,
+            (Math.random() - 0.5) * 12,
+            4.0 + Math.random() * 10,
+            (Math.random() - 0.5) * 12,
+            isSpark ? 0.42 : 1.4 + Math.random() * 1.5,
+            isSpark ? 0.65 : 1.5 + Math.random() * 0.9,
+            isSpark ? 14.0 : 4.2,
+            isSpark ? 0xffb347 : 0xdbeafe,
+          );
+        }
+
+        if (!this.userAdjustedCameraInSink && !this.autoFocusedBreakup) {
+          this.autoFocusedBreakup = true;
+          this.focusVesselSpot('funnels', false);
+        }
+      }
+
+      // 1) Forward Bow Section breaks free & plunges deep into the abyss (0.40 -> 0.74)
+      const bowT = THREE.MathUtils.clamp((p - 0.4) / 0.34, 0, 1);
+      const eBow = bowT * bowT * (3 - 2 * bowT);
+      this.ship.bowGroup.rotation.x = THREE.MathUtils.lerp(-0.34, -0.78, eBow);
+      this.ship.bowGroup.position.y = THREE.MathUtils.lerp(3.53, -76.0, Math.pow(bowT, 1.18));
+
+      // 2) Stern Section violently slams back down (0.40 -> 0.55), then tilts vertical & plunges completely (0.55 -> 1.00)
+      if (p < 0.55) {
+        const settleT = (p - 0.4) / 0.15;
+        const eSettle = Math.sin(settleT * Math.PI * 0.5);
+        this.ship.sternGroup.rotation.x = THREE.MathUtils.lerp(-0.34, -0.05, eSettle);
+        this.ship.sternGroup.position.y = THREE.MathUtils.lerp(3.53, -3.2, eSettle);
+        this.sinkList = this.listDirection * THREE.MathUtils.lerp(0.16, 0.08, eSettle);
+      } else if (p < 0.78) {
+        const tiltT = (p - 0.55) / 0.23;
+        const eTilt = tiltT * tiltT * (3 - 2 * tiltT);
+        this.ship.sternGroup.rotation.x = THREE.MathUtils.lerp(-0.05, -1.38, eTilt);
+        this.ship.sternGroup.position.y = THREE.MathUtils.lerp(-3.2, -56.0, eTilt);
+        this.sinkList = this.listDirection * THREE.MathUtils.lerp(0.08, 0.03, eTilt);
+
+        if (p > 0.68 && this.eventTimer <= 0.5) {
+          this.eventText = 'STERN RISING VERTICAL — FINAL PLUNGE';
+          this.eventTimer = 4.0;
+        }
+      } else {
+        const plungeT = (p - 0.78) / 0.22;
+        this.ship.sternGroup.rotation.x = THREE.MathUtils.lerp(-1.38, -1.46, plungeT);
+        this.ship.sternGroup.position.y = THREE.MathUtils.lerp(-56.0, -138.0, Math.pow(plungeT, 1.12));
+        this.sinkList = this.listDirection * THREE.MathUtils.lerp(0.03, 0.0, plungeT);
+      }
+
+      // Interior break-cap embers dim as water floods the open bulkheads
+      const emberFade = Math.max(0, 1 - (p - 0.4) / 0.16);
+      this.ship.setBreakupVisual(true, emberFade * 1.35);
+    }
 
     // Rising cold Atlantic floodwater inside the wheelhouse
-    const whFlood = THREE.MathUtils.clamp((this.sinkProgress - 0.06) / 0.46, 0, 1);
+    const whFlood = THREE.MathUtils.clamp((p - 0.05) / 0.34, 0, 1);
     this.ship.setWheelhouseFloodLevel(whFlood);
 
-    // Boiler room flooding causes bridge dynamos to flicker & fail
-    if (this.sinkProgress < 0.42) {
-      this.powerLevel = 1.0 - this.sinkProgress * 0.4;
-    } else if (this.sinkProgress < 0.78) {
-      const fade = 1 - (this.sinkProgress - 0.42) / 0.36;
-      const flicker = 0.35 + 0.65 * Math.abs(Math.sin(this.simTime * 29) * Math.cos(this.simTime * 17));
+    // Boiler room flooding causes bridge dynamos to flicker & fail completely shortly after breakup
+    if (p < 0.34) {
+      this.powerLevel = 1.0 - p * 0.45;
+    } else if (p < 0.56) {
+      const fade = 1 - (p - 0.34) / 0.22;
+      const flicker = 0.3 + 0.7 * Math.abs(Math.sin(this.simTime * 31) * Math.cos(this.simTime * 19));
       this.powerLevel = fade * flicker;
     } else {
       this.powerLevel = 0;
@@ -1259,29 +1404,33 @@ export class TitanicEngine {
 
     // Periodic hull steel groans & rushing water ambience
     this.groanCooldown -= dt;
-    if (this.groanCooldown <= 0 && this.sinkProgress < 0.88) {
+    if (this.groanCooldown <= 0 && p < 0.88) {
       this.groanCooldown = 2.4 + Math.random() * 1.4;
-      this.sound.playHullGroan(0.75 + this.sinkProgress * 0.25);
+      this.sound.playHullGroan(0.75 + p * 0.25);
     }
-    this.sound.updateSinkingAmbience(this.sinkProgress);
+    this.sound.updateSinkingAmbience(p);
 
-    // Churning white foam & trapped air bursts along submerging 269m deck & funnels
-    if (this.sinkProgress < 0.94 && Math.random() < 0.8) {
-      const rightX = Math.cos(this.headingRad);
-      const rightZ = Math.sin(this.headingRad);
-      const along = THREE.MathUtils.lerp(70, -165, this.sinkProgress) + (Math.random() - 0.5) * 34;
-      const sideOff = (Math.random() - 0.5) * 22;
+    // Churning white foam & trapped air bursts along submerging bow, break zone & plunging stern
+    if (Math.random() < 0.88) {
+      const along =
+        p < 0.4
+          ? THREE.MathUtils.lerp(70, -110, p / 0.4)
+          : p < 0.74
+            ? THREE.MathUtils.lerp(-35, -145, (p - 0.4) / 0.34)
+            : THREE.MathUtils.lerp(-105, -185, (p - 0.74) / 0.26);
+      const jitterAlong = along + (Math.random() - 0.5) * 32;
+      const sideOff = (Math.random() - 0.5) * 24;
       this.particles.emit(
-        this.shipX + fwdX * along + rightX * sideOff,
-        0.35 + Math.random() * 1.5,
-        this.shipZ + fwdZ * along + rightZ * sideOff,
-        (Math.random() - 0.5) * 4.5,
-        2.5 + Math.random() * 4.5,
-        (Math.random() - 0.5) * 4.5,
-        0.8 + Math.random() * 1.2,
-        0.8 + Math.random() * 0.6,
-        6.5,
-        Math.random() < 0.35 ? 0xe0f2fe : 0x9bd7f5,
+        this.shipX + fwdX * jitterAlong + rightX * sideOff,
+        0.35 + Math.random() * 1.6,
+        this.shipZ + fwdZ * jitterAlong + rightZ * sideOff,
+        (Math.random() - 0.5) * 5.0,
+        2.6 + Math.random() * 5.2,
+        (Math.random() - 0.5) * 5.0,
+        0.85 + Math.random() * 1.4,
+        0.85 + Math.random() * 0.7,
+        6.2,
+        Math.random() < 0.4 ? 0xe0f2fe : 0x9bd7f5,
       );
     }
 
@@ -1289,34 +1438,73 @@ export class TitanicEngine {
     this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
       this.simTime,
       dt,
-      this.sinkProgress,
-      this.ship.hullMeshGroup,
+      p,
       this.ship.root,
     );
-    // Smoothly pull out to Boat Deck & Lifeboats overlook if player hasn't manually moved camera
-    if (
-      !this.userAdjustedCameraInSink &&
-      !this.autoFocusedSinkLifeboats &&
-      this.sinkProgress > 0.22
-    ) {
+
+    // Auto-pull out smoothly to Boat Deck & then Full Ship view so the player sees the entire breakup & plunge
+    if (!this.userAdjustedCameraInSink && !this.autoFocusedSinkLifeboats && p > 0.08) {
       this.autoFocusedSinkLifeboats = true;
-      this.focusVesselSpot('lifeboats', false);
+      this.focusVesselSpot('funnels', false);
     }
 
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
     this.particles.update(dt);
-    this.shakeIntensity = Math.max(0.08 * (1 - this.sinkProgress), this.shakeIntensity - dt * 1.5);
+    this.shakeIntensity = Math.max(0.06 * (1 - p), this.shakeIntensity - dt * 1.4);
     this.updateCamera(dt);
 
     if (this.sinkProgress >= 1) {
-      this.phase = 'gameover';
-      this.saveBestScore();
-      this.emitTelemetry();
+      this.enterAftermath();
       return;
     }
 
     this.telemetryAccum += dt;
     if (this.telemetryAccum >= 0.08) {
+      this.telemetryAccum = 0;
+      this.emitTelemetry();
+    }
+  }
+
+  private stepAftermathSequence(dt: number): void {
+    this.ship.hullMeshGroup.visible = false;
+    this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, 1.5, dt);
+
+    const fwdX = Math.sin(this.headingRad);
+    const fwdZ = -Math.cos(this.headingRad);
+    const rightX = Math.cos(this.headingRad);
+    const rightZ = Math.sin(this.headingRad);
+
+    // Gentle residual bubbles & ocean foam surfacing over where the two halves went down
+    if (Math.random() < 0.42) {
+      const along = -95 - Math.random() * 85;
+      const sideOff = (Math.random() - 0.5) * 26;
+      this.particles.emit(
+        this.shipX + fwdX * along + rightX * sideOff,
+        0.25,
+        this.shipZ + fwdZ * along + rightZ * sideOff,
+        (Math.random() - 0.5) * 2.2,
+        1.5 + Math.random() * 2.8,
+        (Math.random() - 0.5) * 2.2,
+        0.75 + Math.random() * 0.9,
+        1.1 + Math.random() * 0.6,
+        3.5,
+        0xbfe3f7,
+      );
+    }
+
+    this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
+      this.simTime,
+      dt,
+      1.0,
+      this.ship.root,
+    );
+    this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, 0, 1.0);
+    this.particles.update(dt);
+    this.updateCamera(dt);
+    this.sound.updateShipAmbience(0, false);
+
+    this.telemetryAccum += dt;
+    if (this.telemetryAccum >= 0.12) {
       this.telemetryAccum = 0;
       this.emitTelemetry();
     }
@@ -1332,18 +1520,19 @@ export class TitanicEngine {
     const turnHeel = -this.yawRate * 0.14;
     this.rollAngle = THREE.MathUtils.damp(this.rollAngle, waveRoll + turnHeel + this.sinkList, 4, dt);
 
-    this.ship.hullMeshGroup.position.y = THREE.MathUtils.damp(
-      this.ship.hullMeshGroup.position.y,
-      this.sinkDropY,
-      3.5,
-      dt,
-    );
-    this.ship.hullMeshGroup.rotation.x = THREE.MathUtils.damp(
-      this.ship.hullMeshGroup.rotation.x,
-      wavePitch + this.sinkPitch,
-      3.5,
-      dt,
-    );
+    if (this.phase !== 'sinking' && this.phase !== 'aftermath' && this.phase !== 'gameover') {
+      const totalPitch = wavePitch + this.sinkPitch;
+      const hingeY = this.sinkDropY - BREAK_Z * Math.sin(totalPitch);
+      const dampedY = THREE.MathUtils.damp(this.ship.bowGroup.position.y, hingeY, 3.5, dt);
+      const dampedPitch = THREE.MathUtils.damp(this.ship.bowGroup.rotation.x, totalPitch, 3.5, dt);
+      this.ship.bowGroup.position.y = dampedY;
+      this.ship.bowGroup.rotation.x = dampedPitch;
+      this.ship.sternGroup.position.y = dampedY;
+      this.ship.sternGroup.rotation.x = dampedPitch;
+    }
+
+    this.ship.hullMeshGroup.position.y = 0;
+    this.ship.hullMeshGroup.rotation.x = 0;
     this.ship.hullMeshGroup.rotation.z = this.rollAngle;
 
     // Wheelhouse Helm Wheel, Rudder Needle & Overhead Clinometer Pendulum
@@ -1401,19 +1590,19 @@ export class TitanicEngine {
 
   private emitBowSpray(dt: number, fwdX: number, fwdZ: number, lightSmokeOnly = false): void {
     const absSpd = Math.abs(this.speedKnots);
-    const hullY = this.ship.hullMeshGroup.position.y;
+    const bowRefY = this.ship.bowGroup.position.y - (-BREAK_Z) * Math.sin(this.ship.bowGroup.rotation.x);
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
 
     // Subtle coal smoke wisps from active forward funnels #1, #2, #3 (at z = 26, 56, 86; top y = 32.5)
-    if (this.powerLevel > 0.1 && hullY > -12) {
+    if (this.powerLevel > 0.1 && bowRefY > -12) {
       this.smokeAccum += dt * ((lightSmokeOnly ? 1.8 : 2.8) + absSpd * 0.3);
       while (this.smokeAccum >= 1) {
         this.smokeAccum -= 1;
         const funnelZ = [26.0, 56.0, 86.0][Math.floor(Math.random() * 3)];
         this.particles.emit(
           this.shipX - fwdX * funnelZ + (Math.random() - 0.5) * 1.8,
-          32.5 + hullY,
+          32.5 + bowRefY,
           this.shipZ - fwdZ * funnelZ + (Math.random() - 0.5) * 1.8,
           -fwdX * (2.5 + absSpd * 0.35) + (Math.random() - 0.5) * 1.6,
           2.4 + Math.random() * 1.4,
@@ -1663,17 +1852,43 @@ export class TitanicEngine {
     this.orbitPitch = THREE.MathUtils.damp(this.orbitPitch, this.targetOrbitPitch, 7, dt);
     this.orbitDistance = THREE.MathUtils.damp(this.orbitDistance, this.targetOrbitDistance, 7, dt);
 
-    // Transform local ship spot into world space respecting hull trim/list & heading
-    const hullY = this.ship.hullMeshGroup.position.y;
-    const hullPitch = this.ship.hullMeshGroup.rotation.x;
+    // Transform local ship spot into world space respecting intact/split bow & stern half transforms
+    _vFocusLocal.copy(this.camFocusLocal);
+
+    const isSinkOrAfter =
+      this.phase === 'sinking' || this.phase === 'aftermath' || this.phase === 'gameover';
+    const isOverviewShip = spec.id === 'funnels' && isSinkOrAfter;
+
+    if (isOverviewShip) {
+      // Pan focus smoothly from midships toward the stern plunge site while keeping camera at sea level
+      const panT = THREE.MathUtils.clamp((this.sinkProgress - 0.42) / 0.42, 0, 1);
+      _vFocusLocal.z = THREE.MathUtils.lerp(62, 118, panT);
+    }
+
+    const useSternHalf = spec.id === 'stern';
+    const halfGroup = useSternHalf ? this.ship.sternGroup : this.ship.bowGroup;
+    const halfY = halfGroup.position.y;
+    const halfPitch = halfGroup.rotation.x;
     const hullRoll = this.ship.hullMeshGroup.rotation.z;
 
-    _vFocusLocal.copy(this.camFocusLocal);
-    const pitchedY = _vFocusLocal.y - _vFocusLocal.z * Math.sin(hullPitch) + _vFocusLocal.x * Math.sin(hullRoll);
-    const worldY =
-      this.phase === 'sinking' || this.phase === 'gameover'
-        ? Math.max(-2.2, hullY + pitchedY)
-        : hullY + pitchedY;
+    const dzFromBreak = _vFocusLocal.z - BREAK_Z;
+    const pitchedY =
+      halfY +
+      _vFocusLocal.y * Math.cos(halfPitch) -
+      dzFromBreak * Math.sin(halfPitch) +
+      _vFocusLocal.x * Math.sin(hullRoll);
+
+    let worldY = pitchedY;
+    if (this.phase === 'aftermath' || this.phase === 'gameover') {
+      worldY = 4.2;
+    } else if (isOverviewShip) {
+      const sternY = this.ship.sternGroup.position.y;
+      const sternPitch = this.ship.sternGroup.rotation.x;
+      const sternTipWorldY = sternY + 10 * Math.cos(sternPitch) - (195.1 - BREAK_Z) * Math.sin(sternPitch);
+      worldY = THREE.MathUtils.clamp(Math.max(4.5, sternTipWorldY * 0.38), 3.5, 24.0);
+    } else if (isSinkOrAfter) {
+      worldY = Math.max(-1.2, pitchedY);
+    }
 
     _vFwd.set(Math.sin(this.headingRad), 0, -Math.cos(this.headingRad));
     _vRight.set(Math.cos(this.headingRad), 0, Math.sin(this.headingRad));

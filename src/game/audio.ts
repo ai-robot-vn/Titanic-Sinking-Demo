@@ -296,6 +296,55 @@ export class SoundEngine {
     osc2.stop(now + 2.15);
   }
 
+  public playBreakupSnap(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // 1. Massive low-frequency keel & girder snap boom
+    const subOsc = this.ctx.createOscillator();
+    const subGain = this.ctx.createGain();
+    subOsc.type = 'sawtooth';
+    subOsc.frequency.setValueAtTime(105, now);
+    subOsc.frequency.exponentialRampToValueAtTime(22, now + 1.4);
+    subGain.gain.setValueAtTime(0.42, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+    subOsc.connect(subGain);
+    subGain.connect(this.masterGain);
+    subOsc.start(now);
+    subOsc.stop(now + 1.55);
+
+    // 2. Two-stage tearing steel screech & collapsing bulkheads
+    [0, 0.24].forEach((offset, idx) => {
+      const dur = idx === 0 ? 1.15 : 1.55;
+      const buf = this.ctx!.createBuffer(
+        1,
+        Math.floor(this.ctx!.sampleRate * dur),
+        this.ctx!.sampleRate,
+      );
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx!.sampleRate * (idx === 0 ? 0.32 : 0.48)));
+      }
+      const noise = this.ctx!.createBufferSource();
+      noise.buffer = buf;
+
+      const bp = this.ctx!.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(idx === 0 ? 860 : 480, now + offset);
+      bp.frequency.exponentialRampToValueAtTime(140, now + offset + dur);
+      bp.Q.value = 1.9;
+
+      const nGain = this.ctx!.createGain();
+      nGain.gain.setValueAtTime(idx === 0 ? 0.45 : 0.38, now + offset);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + offset + dur);
+
+      noise.connect(bp);
+      bp.connect(nGain);
+      nGain.connect(this.masterGain!);
+      noise.start(now + offset);
+    });
+  }
+
   public updateSinkingAmbience(sinkProgress: number): void {
     if (!this.initialized || !this.ctx || !this.engineGain || !this.engineOsc1 || !this.engineOsc2 || !this.oceanNoiseGain || !this.oceanFilter) {
       return;

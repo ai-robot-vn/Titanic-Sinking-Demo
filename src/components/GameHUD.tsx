@@ -28,6 +28,8 @@ interface GameHUDProps {
   onTogglePause: () => void;
   onToggleMute: () => void;
   onSkipSinking: () => void;
+  onOpenReport: () => void;
+  onRestart: () => void;
 }
 
 function getCardinalLabel(deg: number): string {
@@ -45,6 +47,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onTogglePause,
   onToggleMute,
   onSkipSinking,
+  onOpenReport,
+  onRestart,
 }) => {
   const [dockCollapsed, setDockCollapsed] = useState(false);
 
@@ -59,6 +63,15 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   }, []);
 
   const isSinking = telemetry.phase === 'sinking';
+  const isAftermath = telemetry.phase === 'aftermath';
+  const sinkingStageText =
+    telemetry.sinkProgress < 0.4
+      ? 'BOW FLOODING — STERN RISING ABOVE SEA'
+      : telemetry.sinkProgress < 0.56
+        ? 'HULL FRACTURED AT MIDSHIPS — BREAKING IN TWO'
+        : telemetry.sinkProgress < 0.78
+          ? 'BOW SUBMERGED — STERN REARING VERTICAL'
+          : 'FINAL PLUNGE — VESSEL SINKING BENEATH WAVES';
   const hullPct = telemetry.hullIntegrity;
   const hullColor =
     hullPct > 60 ? '#34d399' : hullPct > 30 ? '#fbbf24' : '#ef4444';
@@ -97,7 +110,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
 
           {/* Water Ingress / Flooding Meter */}
-          {(floodPct > 0 || isSinking) && (
+          {(floodPct > 0 || isSinking || isAftermath) && (
             <div className="mb-2">
               <div className="flex items-center justify-between text-[10px] tracking-[0.14em] uppercase mb-1">
                 <span className="flex items-center gap-1 text-[#93c5fd]">
@@ -146,10 +159,19 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           {isSinking ? (
             <div className="flex flex-wrap items-center justify-center gap-2">
               <div className="bg-[#450a0a]/92 border border-[#ef4444]/85 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.18em] uppercase text-[#fecaca]">
-                ▲ BULKHEADS OVERWHELMED — SHIP SINKING
+                ▲ {sinkingStageText}
               </div>
               <div className="bg-[#071526]/92 border border-[#c99c43]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#f3d999] tabular-nums">
                 LIFEBOATS LOWERED: {telemetry.lifeboatsLaunched} / 16
+              </div>
+            </div>
+          ) : isAftermath ? (
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <div className="bg-[#070e18]/92 border border-[#c99c43]/65 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.18em] uppercase text-[#e6c373]">
+                RMS TITANIC LOST BENEATH THE ATLANTIC
+              </div>
+              <div className="bg-[#071526]/92 border border-[#c99c43]/50 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#c7d6e6] tabular-nums">
+                LIFEBOATS ADRIFT: {telemetry.lifeboatsLaunched} / 16
               </div>
             </div>
           ) : (
@@ -186,7 +208,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
 
           <div className="flex flex-col gap-1.5 pointer-events-auto">
-            {!isSinking && (
+            {!isSinking && !isAftermath && (
               <button
                 type="button"
                 onClick={onTogglePause}
@@ -208,7 +230,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       </div>
 
-      {/* BOTTOM BAR: SINKING CONTROLS vs COLLAPSIBLE HELM DOCK */}
+      {/* BOTTOM BAR: SINKING / AFTERMATH CONTROLS vs COLLAPSIBLE HELM DOCK */}
       {isSinking ? (
         <div className="flex flex-col items-center gap-2">
           <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/50 rounded-sm px-3.5 py-2 flex flex-wrap items-center justify-center gap-2 max-w-[95vw]">
@@ -239,11 +261,33 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               className="flex items-center gap-1.5 px-3 py-1 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#c7d6e6] border-[#c99c43]/35 text-[10px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
             >
               <FastForward className="w-3.5 h-3.5" />
-              SKIP TO REPORT [SPACE]
+              SKIP TO AFTERMATH [SPACE]
             </button>
           </div>
           <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4]/85 bg-[#070e18]/75 px-3 py-0.5 rounded-sm">
             Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · S to Focus Station
+          </div>
+        </div>
+      ) : isAftermath ? (
+        <div className="flex flex-col items-center gap-2">
+          <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/55 rounded-sm px-4 py-2.5 flex flex-wrap items-center justify-center gap-2.5 max-w-[95vw]">
+            <button
+              type="button"
+              onClick={onOpenReport}
+              className="px-3.5 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#e6c373] border-[#c99c43]/45 text-[11px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
+            >
+              VOYAGE REPORT
+            </button>
+            <button
+              type="button"
+              onClick={onRestart}
+              className="px-4 py-1.5 rounded-[2px] bg-[#c99c43] hover:bg-[#dcb15a] text-[#08101c] text-[11px] font-bold tracking-[0.15em] uppercase transition-colors cursor-pointer"
+            >
+              SAIL AGAIN [ENTER]
+            </button>
+          </div>
+          <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4]/85 bg-[#070e18]/75 px-3 py-0.5 rounded-sm">
+            Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Watch the 16 Lifeboats Adrift
           </div>
         </div>
       ) : (
