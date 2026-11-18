@@ -199,6 +199,7 @@ export const TELEGRAPH_NOTCHES: TelegraphSpec[] = [
 ];
 
 export type IcebergVariant = 'growler' | 'tabular' | 'pinnacle';
+export type CarpathiaStage = 'waiting' | 'approaching' | 'boarding' | 'complete';
 
 export interface TelemetrySnapshot {
   phase: GamePhase;
@@ -217,6 +218,13 @@ export interface TelemetrySnapshot {
   compartmentsBreached: number; // 0 to 5
   sinkProgress: number; // 0 to 1 during sinking sequence
   lifeboatsLaunched: number;
+  aftermathSeconds: number;
+  carpathiaStage: CarpathiaStage;
+  carpathiaEtaSec: number;
+  carpathiaDistanceM: number;
+  survivorsRescued: number;
+  boatsRecovered: number;
+  focusCarpathia: boolean;
   harborChapterIndex: number;
   harborProgress: number;
   harborAutoPlay: boolean;

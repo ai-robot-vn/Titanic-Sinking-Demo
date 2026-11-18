@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { SoundEngine } from './audio';
+import { buildCarpathiaShip, CarpathiaRig } from './carpathiaBuilder';
 import { buildSouthamptonHarbor, HarborRig } from './harborBuilder';
 import { IcebergEntity, IcebergFactory } from './icebergBuilder';
 import { createOceanAndSky, OceanAndSkyRig, ParticlePool } from './oceanAndSky';
@@ -8,6 +9,7 @@ import { buildTitanicShip, BREAK_Z, TitanicShipRig } from './shipBuilder';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import {
   CameraMode,
+  CarpathiaStage,
   GamePhase,
   HARBOR_CHAPTERS,
   IcebergVariant,
@@ -49,6 +51,7 @@ export class TitanicEngine {
 
   private readonly textures: ProceduralTextureSet;
   private readonly ship: TitanicShipRig;
+  private readonly carpathia: CarpathiaRig;
   private readonly harbor: HarborRig;
   private readonly oceanAndSky: OceanAndSkyRig;
   private readonly iceFactory: IcebergFactory;
@@ -89,6 +92,15 @@ export class TitanicEngine {
   private powerLevel = 1;
   private groanCooldown = 0;
   private lifeboatsLaunched = 0;
+  private aftermathSeconds = 0;
+  private carpathiaStage: CarpathiaStage = 'waiting';
+  private carpathiaDistanceM = 460;
+  private carpathiaWhistlePlayed = false;
+  private rescueCompleteWhistlePlayed = false;
+  private survivorsRescued = 0;
+  private boatsRecovered = 0;
+  private focusCarpathia = false;
+  private flareCooldown = 4.0;
   private score = 0;
   private bestScore = 0;
   private nearMissCount = 0;
@@ -250,6 +262,9 @@ export class TitanicEngine {
     this.ship = buildTitanicShip(this.textures, this.isSoftwareGl);
     this.scene.add(this.ship.root);
 
+    this.carpathia = buildCarpathiaShip(this.textures, this.isSoftwareGl);
+    this.scene.add(this.carpathia.root);
+
     // Searchlight SpotLight attached to forward bridge roof (sinks with bow half)
     this.searchSpotLight = new THREE.SpotLight(0xeef8ff, 24, 480, Math.PI / 9, 0.55, 1.1);
     this.searchSpotLight.position.set(0, 16.25, -1.5);
@@ -371,6 +386,16 @@ export class TitanicEngine {
     this.ship.sternGroup.rotation.set(0, 0, 0);
     this.ship.setBreakupVisual(false, 0);
     this.ship.crewAndLifeboats.reset();
+    this.carpathia.root.visible = false;
+    this.aftermathSeconds = 0;
+    this.carpathiaStage = 'waiting';
+    this.carpathiaDistanceM = 460;
+    this.carpathiaWhistlePlayed = false;
+    this.rescueCompleteWhistlePlayed = false;
+    this.survivorsRescued = 0;
+    this.boatsRecovered = 0;
+    this.focusCarpathia = false;
+    this.flareCooldown = 4.0;
   }
 
   public setHarborChapter(idx: number): void {
@@ -554,13 +579,45 @@ export class TitanicEngine {
     }
   }
 
+  public fastForwardRescueWait(): void {
+    if (this.phase === 'aftermath' && this.carpathiaStage === 'waiting') {
+      this.aftermathSeconds = Math.max(this.aftermathSeconds, 58.0);
+      this.emitTelemetry();
+    }
+  }
+
+  public focusOnCarpathia(enable: boolean): void {
+    if (this.phase !== 'aftermath' && this.phase !== 'gameover') return;
+    this.focusCarpathia = enable && this.carpathia.root.visible;
+    if (this.focusCarpathia) {
+      this.targetOrbitYaw = 0.85;
+      this.targetOrbitPitch = 0.16;
+      this.targetOrbitDistance = 122;
+    } else {
+      this.targetOrbitYaw = 0.72;
+      this.targetOrbitPitch = 0.22;
+      this.targetOrbitDistance = 135;
+    }
+    this.emitTelemetry();
+  }
+
   private enterAftermath(): void {
     this.phase = 'aftermath';
     this.ship.hullMeshGroup.visible = false;
+    this.aftermathSeconds = 0;
+    this.carpathiaStage = 'waiting';
+    this.carpathiaDistanceM = 460;
+    this.carpathiaWhistlePlayed = false;
+    this.rescueCompleteWhistlePlayed = false;
+    this.survivorsRescued = 0;
+    this.boatsRecovered = 0;
+    this.focusCarpathia = false;
+    this.flareCooldown = 3.5;
+    this.carpathia.root.visible = false;
     if (VESSEL_SPOTS[this.focusSpotIndex].id === 'wheelhouse') {
       this.focusVesselSpot('funnels', false);
     }
-    this.eventText = 'RMS TITANIC SUBMERGED — 16 LIFEBOATS ADRIFT';
+    this.eventText = 'RMS TITANIC SUBMERGED — SIGNALING FOR RESCUE';
     this.eventTimer = 5.5;
     this.saveBestScore();
     this.emitTelemetry();
@@ -970,12 +1027,7 @@ export class TitanicEngine {
       if (this.phase === 'victory') {
         this.ship.crewAndLifeboats.updateCruising(this.simTime, dt, this.floodingPct);
       } else {
-        this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
-          this.simTime,
-          dt,
-          1.0,
-          this.ship.root,
-        );
+        this.advanceRescueSimulation(dt);
       }
       this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, this.speedKnots, 1.0);
       this.particles.update(dt);
@@ -1465,6 +1517,173 @@ export class TitanicEngine {
     }
   }
 
+  private emitRescueFlare(worldX: number, worldZ: number, colorHex: number): void {
+    for (let i = 0; i < 16; i++) {
+      this.particles.emit(
+        worldX + (Math.random() - 0.5) * 1.6,
+        1.2,
+        worldZ + (Math.random() - 0.5) * 1.6,
+        (Math.random() - 0.5) * 2.4,
+        24.0 + Math.random() * 14.0,
+        (Math.random() - 0.5) * 2.4,
+        0.55 + Math.random() * 0.45,
+        1.4 + Math.random() * 0.9,
+        9.8,
+        colorHex,
+      );
+    }
+    this.sound.playRescueFlare();
+  }
+
+  private advanceRescueSimulation(dt: number): void {
+    const WAIT_SEC = 60.0;
+    const APPROACH_SEC = 34.0;
+    const BOARDING_SEC = 40.0;
+
+    this.aftermathSeconds += dt;
+    const t = this.aftermathSeconds;
+
+    const fwdX = Math.sin(this.headingRad);
+    const fwdZ = -Math.cos(this.headingRad);
+    const rightX = Math.cos(this.headingRad);
+    const rightZ = Math.sin(this.headingRad);
+
+    let carpLocalX = -220;
+    let carpLocalZ = -420;
+    let carpLocalYaw = 0.35;
+    let boardingProgress = 0;
+    let laddersDeployed = false;
+    let sweepLight = false;
+
+    if (t < WAIT_SEC) {
+      this.carpathiaStage = 'waiting';
+      this.carpathia.root.visible = false;
+      this.carpathiaDistanceM = 460;
+
+      // Periodic distress flares fired from lifeboats every ~12s during the 1-minute night vigil
+      this.flareCooldown -= dt;
+      if (this.flareCooldown <= 0) {
+        this.flareCooldown = 11.5;
+        const boat = this.ship.crewAndLifeboats.lifeboats[Math.floor(Math.random() * 16)];
+        boat.boatGroup.getWorldPosition(_vFocusWorld);
+        this.emitRescueFlare(_vFocusWorld.x, _vFocusWorld.z, 0xd9f99d);
+      }
+    } else if (t < WAIT_SEC + APPROACH_SEC) {
+      this.carpathiaStage = 'approaching';
+      const u = THREE.MathUtils.clamp((t - WAIT_SEC) / APPROACH_SEC, 0, 1);
+      // Slow, stately Cunard deceleration curve toward the lifeboat cluster
+      const easeOut = 1 - Math.pow(1 - u, 2.3);
+      carpLocalX = THREE.MathUtils.lerp(-220, 0, easeOut);
+      carpLocalZ = THREE.MathUtils.lerp(-420, 56, easeOut);
+      carpLocalYaw = THREE.MathUtils.lerp(0.48, 0.22, easeOut);
+      this.carpathiaDistanceM = Math.round(Math.hypot(carpLocalX, carpLocalZ - 56));
+      sweepLight = true;
+
+      this.carpathia.root.visible = true;
+      if (!this.carpathiaWhistlePlayed) {
+        this.carpathiaWhistlePlayed = true;
+        this.sound.playCarpathiaWhistle();
+        this.eventText = 'RMS CARPATHIA SIGHTED ON THE HORIZON';
+        this.eventTimer = 5.5;
+        // Signal green answer rocket from Carpathia
+        const wx = this.shipX + rightX * carpLocalX + fwdX * -carpLocalZ;
+        const wz = this.shipZ + rightZ * carpLocalX + fwdZ * -carpLocalZ;
+        this.emitRescueFlare(wx, wz, 0x6ee7b7);
+        this.focusOnCarpathia(true);
+      }
+
+      // Gentle predawn sky lift as rescue liner arrives
+      const dawnMix = easeOut * 0.22;
+      this.tempColorA.setHex(0x091628);
+      this.tempColorB.setHex(0x162b4d);
+      (this.scene.background as THREE.Color).copy(this.tempColorA).lerp(this.tempColorB, dawnMix);
+      this.sceneFog.color.copy(this.scene.background as THREE.Color);
+
+      // Subtle bow spray & red funnel coal wisps while moving slowly
+      if (u < 0.85 && Math.random() < 0.45) {
+        const bx = this.shipX + rightX * carpLocalX + fwdX * -carpLocalZ;
+        const bz = this.shipZ + rightZ * carpLocalX + fwdZ * -carpLocalZ;
+        this.particles.emit(
+          bx + (Math.random() - 0.5) * 4,
+          26.5,
+          bz + (Math.random() - 0.5) * 4,
+          (Math.random() - 0.5) * 2.0,
+          2.2 + Math.random() * 1.2,
+          (Math.random() - 0.5) * 2.0,
+          1.4,
+          2.1,
+          -0.6,
+          0x2d3644,
+        );
+      }
+    } else if (t < WAIT_SEC + APPROACH_SEC + BOARDING_SEC) {
+      if (this.carpathiaStage !== 'boarding') {
+        this.carpathiaStage = 'boarding';
+        this.sound.playCarpathiaWhistle();
+        this.eventText = 'CARPATHIA ALL STOP — LOWERING BOARDING LADDERS';
+        this.eventTimer = 5.0;
+      }
+      carpLocalX = 0;
+      carpLocalZ = 56;
+      carpLocalYaw = 0.22;
+      this.carpathiaDistanceM = 0;
+      laddersDeployed = true;
+      sweepLight = true;
+      this.carpathia.root.visible = true;
+      boardingProgress = THREE.MathUtils.clamp((t - WAIT_SEC - APPROACH_SEC) / BOARDING_SEC, 0, 1);
+    } else {
+      if (this.carpathiaStage !== 'complete') {
+        this.carpathiaStage = 'complete';
+        if (!this.rescueCompleteWhistlePlayed) {
+          this.rescueCompleteWhistlePlayed = true;
+          this.sound.playCarpathiaWhistle();
+        }
+        this.eventText = 'RESCUE COMPLETE — ALL 712 SURVIVORS ABOARD CARPATHIA';
+        this.eventTimer = 7.0;
+      }
+      carpLocalX = 0;
+      carpLocalZ = 56;
+      carpLocalYaw = 0.22;
+      this.carpathiaDistanceM = 0;
+      laddersDeployed = true;
+      sweepLight = false;
+      this.carpathia.root.visible = true;
+      boardingProgress = 1.0;
+    }
+
+    if (this.carpathia.root.visible) {
+      const carpWorldX = this.shipX + rightX * carpLocalX + fwdX * -carpLocalZ;
+      const carpWorldZ = this.shipZ + rightZ * carpLocalX + fwdZ * -carpLocalZ;
+      const waveY = Math.sin(this.simTime * 0.85) * 0.14;
+      const wavePitch = Math.sin(this.simTime * 0.72) * 0.008;
+      const waveRoll = Math.cos(this.simTime * 0.62) * 0.012;
+      this.carpathia.root.position.set(carpWorldX, waveY, carpWorldZ);
+      this.carpathia.root.rotation.set(wavePitch, -this.headingRad + carpLocalYaw, waveRoll);
+    }
+
+    const rescueRes = this.ship.crewAndLifeboats.updateRescue(
+      this.simTime,
+      dt,
+      this.carpathiaStage,
+      boardingProgress,
+      this.carpathia.root,
+      this.carpathia.boardingStationsLocal,
+      this.ship.root,
+    );
+    this.boatsRecovered = rescueRes.boatsRecovered;
+    this.survivorsRescued = rescueRes.survivorsRescued;
+    this.lifeboatsLaunched = 16;
+
+    if (this.carpathia.root.visible) {
+      this.carpathia.setRescueState(
+        this.simTime,
+        this.survivorsRescued / 712,
+        laddersDeployed,
+        sweepLight,
+      );
+    }
+  }
+
   private stepAftermathSequence(dt: number): void {
     this.ship.hullMeshGroup.visible = false;
     this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, 1.5, dt);
@@ -1474,8 +1693,8 @@ export class TitanicEngine {
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
 
-    // Gentle residual bubbles & ocean foam surfacing over where the two halves went down
-    if (Math.random() < 0.42) {
+    // Gentle residual bubbles over Titanic's resting spot for the first 35 seconds
+    if (this.aftermathSeconds < 35 && Math.random() < 0.38) {
       const along = -95 - Math.random() * 85;
       const sideOff = (Math.random() - 0.5) * 26;
       this.particles.emit(
@@ -1492,16 +1711,11 @@ export class TitanicEngine {
       );
     }
 
-    this.lifeboatsLaunched = this.ship.crewAndLifeboats.updateSinking(
-      this.simTime,
-      dt,
-      1.0,
-      this.ship.root,
-    );
+    this.advanceRescueSimulation(dt);
     this.oceanAndSky.update(this.simTime, this.shipX, this.shipZ, this.headingRad, 0, 1.0);
     this.particles.update(dt);
     this.updateCamera(dt);
-    this.sound.updateShipAmbience(0, false);
+    this.sound.updateShipAmbience(this.carpathiaStage === 'approaching' ? 6 : 0, false);
 
     this.telemetryAccum += dt;
     if (this.telemetryAccum >= 0.12) {
@@ -1893,10 +2107,19 @@ export class TitanicEngine {
     _vFwd.set(Math.sin(this.headingRad), 0, -Math.cos(this.headingRad));
     _vRight.set(Math.cos(this.headingRad), 0, Math.sin(this.headingRad));
 
-    _vFocusWorld
-      .set(this.shipX, worldY, this.shipZ)
-      .addScaledVector(_vRight, _vFocusLocal.x)
-      .addScaledVector(_vFwd, -_vFocusLocal.z);
+    if (
+      (this.phase === 'aftermath' || this.phase === 'gameover') &&
+      this.focusCarpathia &&
+      this.carpathia.root.visible
+    ) {
+      _vFocusWorld.copy(this.carpathia.root.position);
+      _vFocusWorld.y = 7.5;
+    } else {
+      _vFocusWorld
+        .set(this.shipX, worldY, this.shipZ)
+        .addScaledVector(_vRight, _vFocusLocal.x)
+        .addScaledVector(_vFwd, -_vFocusLocal.z);
+    }
 
     // Compute unit look direction in ship-local frame, rotated by ship heading
     const cosP = Math.cos(this.orbitPitch);
@@ -1988,11 +2211,18 @@ export class TitanicEngine {
       compartmentsBreached: breached,
       sinkProgress: this.sinkProgress,
       lifeboatsLaunched: this.lifeboatsLaunched,
+      aftermathSeconds: Math.floor(this.aftermathSeconds),
+      carpathiaStage: this.carpathiaStage,
+      carpathiaEtaSec: Math.max(0, Math.ceil(60 - this.aftermathSeconds)),
+      carpathiaDistanceM: this.carpathiaDistanceM,
+      survivorsRescued: this.survivorsRescued,
+      boatsRecovered: this.boatsRecovered,
+      focusCarpathia: this.focusCarpathia,
       harborChapterIndex: this.harborChapterIndex,
       harborProgress: this.harborProgress,
       harborAutoPlay: this.harborAutoPlay,
       timeSkipProgress: this.timeSkipProgress,
-      timeSkipDateLabel,
+      timeSkipDateLabel: timeSkipDateLabel,
       score: Math.round(this.score),
       bestScore: Math.max(this.bestScore, Math.round(this.score)),
       nearMissCount: this.nearMissCount,
@@ -2013,6 +2243,7 @@ export class TitanicEngine {
     this.unbindEvents();
     this.sound.dispose();
     this.ship.dispose();
+    this.carpathia.dispose();
     this.harbor.dispose();
     this.oceanAndSky.dispose();
     this.iceFactory.dispose();

@@ -46,7 +46,13 @@ export const EndModal: React.FC<EndModalProps> = ({
             ? 'Orders are standing by in the wheelhouse.'
             : isVictory
               ? 'You guided RMS Titanic cleanly past the North Atlantic ice barrier with hull integrity intact.'
-              : 'Titanic broke amidships and slipped beneath the freezing Atlantic while 16 lifeboats pulled away into the night.'}
+              : telemetry.carpathiaStage === 'complete'
+                ? 'Titanic broke amidships and sank beneath the Atlantic, but RMS Carpathia arrived on scene and rescued all 712 survivors from the 16 lifeboats.'
+                : telemetry.carpathiaStage === 'boarding'
+                  ? `Titanic sank beneath the Atlantic. RMS Carpathia is alongside with ladders lowered (${telemetry.survivorsRescued} / 712 survivors aboard so far).`
+                  : telemetry.carpathiaStage === 'approaching'
+                    ? 'Titanic sank beneath the Atlantic. RMS Carpathia has sighted the distress flares and is steaming slowly toward the 16 lifeboats.'
+                    : 'Titanic broke amidships and slipped beneath the freezing Atlantic while 16 lifeboats pulled away to await rescue.'}
         </p>
 
         {/* Voyage Summary Readout */}
@@ -58,9 +64,11 @@ export const EndModal: React.FC<EndModalProps> = ({
             </div>
           </div>
           <div>
-            <div className="text-[10px] tracking-[0.14em] uppercase text-[#8ea4bd]">NEAR MISSES</div>
+            <div className="text-[10px] tracking-[0.14em] uppercase text-[#8ea4bd]">
+              {phase === 'gameover' ? 'RESCUED' : 'NEAR MISSES'}
+            </div>
             <div className="text-base font-bold text-[#e6c373] tabular-nums">
-              {telemetry.nearMissCount}
+              {phase === 'gameover' ? `${telemetry.survivorsRescued} / 712` : telemetry.nearMissCount}
             </div>
           </div>
           <div>

@@ -58,8 +58,14 @@ export interface LifeboatRig {
   oarsGroup: THREE.Group;
   lanternMesh: THREE.Mesh;
   detached: boolean;
+  rescued: boolean;
   splashX: number;
   splashZ: number;
+}
+
+export interface RescueProgressResult {
+  boatsRecovered: number;
+  survivorsRescued: number;
 }
 
 export interface CrewAndLifeboatSystem {
@@ -73,6 +79,15 @@ export interface CrewAndLifeboatSystem {
     sinkProgress: number,
     shipRoot: THREE.Group,
   ) => number;
+  updateRescue: (
+    time: number,
+    dt: number,
+    stage: 'waiting' | 'approaching' | 'boarding' | 'complete',
+    boardingProgress: number,
+    carpathiaRoot: THREE.Group,
+    boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>,
+    shipRoot: THREE.Group,
+  ) => RescueProgressResult;
   reset: () => void;
   setLanternPower: (power: number) => void;
   dispose: () => void;
@@ -1781,6 +1796,7 @@ export function createCrewAndLifeboats(
         oarsGroup,
         lanternMesh,
         detached: false,
+        rescued: false,
         splashX: side * 17.5,
         splashZ: bz,
       });
@@ -2026,6 +2042,130 @@ export function createCrewAndLifeboats(
     return launchedCount;
   };
 
+  const updateRescue = (
+    time: number,
+    dt: number,
+    stage: 'waiting' | 'approaching' | 'boarding' | 'complete',
+    boardingProgress: number,
+    carpathiaRoot: THREE.Group,
+    boardingStationsLocal: Array<{ x: number; y: number; z: number; side: -1 | 1 }>,
+    shipRoot: THREE.Group,
+  ): RescueProgressResult => {
+    shipRoot.updateMatrixWorld(true);
+    carpathiaRoot.updateMatrixWorld(true);
+
+    let boatsRecovered = 0;
+    let fractionalSurvivors = 0;
+
+    for (let i = 0; i < lifeboats.length; i++) {
+      const lb = lifeboats[i];
+      if (!lb.detached) {
+        lb.detached = true;
+        lb.homeParent.remove(lb.boatGroup);
+        shipRoot.add(lb.boatGroup);
+        lb.ropeFore.visible = false;
+        lb.ropeAft.visible = false;
+        lb.oarsGroup.visible = true;
+        lb.lanternMesh.visible = true;
+      }
+
+      const waveIdx = Math.floor(i / 4);
+      const slotIdx = i % boardingStationsLocal.length;
+      const st = boardingStationsLocal[slotIdx];
+      const boatWaterY = 0.38 + Math.sin(time * 1.4 + lb.index + i * 0.3) * 0.14;
+
+      if (stage === 'waiting' || stage === 'approaching') {
+        lb.occupantsGroup.visible = true;
+        lb.rescued = false;
+        // Gentle idle station-keeping bob over the sinking site
+        const idleX = lb.boatGroup.position.x + Math.sin(time * 0.25 + i) * 0.12 * dt;
+        const idleZ = lb.boatGroup.position.z + Math.cos(time * 0.2 + i) * 0.12 * dt;
+        lb.boatGroup.position.set(idleX, boatWaterY, idleZ);
+        lb.boatGroup.rotation.set(
+          Math.sin(time * 1.3 + i) * 0.045,
+          lb.side * 0.55 + Math.sin(time * 0.3 + i) * 0.08,
+          Math.cos(time * 1.1 + i) * 0.055,
+        );
+        const sweep = Math.sin(time * 1.5 + i) * 0.18;
+        for (let oi = 0; oi < lb.oarsGroup.children.length; oi++) {
+          const oar = lb.oarsGroup.children[oi];
+          oar.rotation.y = sweep;
+          oar.rotation.x = Math.cos(time * 1.5 + i) * 0.08;
+        }
+        continue;
+      }
+
+      // Boarding or Complete: each lifeboat rows cleanly to its Carpathia gangway ladder, transfers survivors, then clears astern
+      const tStart = waveIdx * 0.16;
+      const tDock = tStart + 0.18;
+      const tUnloadDone = tDock + 0.14;
+
+      const isUnloaded = boardingProgress >= tUnloadDone;
+      const isDocking = boardingProgress >= tStart;
+
+      // Target coordinate in Carpathia local space -> world -> shipRoot local space
+      const carpLocalX = isUnloaded
+        ? st.side * (14.5 + waveIdx * 3.4)
+        : st.x + st.side * (1.2 + (waveIdx % 2) * 0.35);
+      const carpLocalZ = isUnloaded ? 44 + waveIdx * 10 + (slotIdx % 2) * 7 : st.z;
+
+      _tmpWorldPos.set(carpLocalX, boatWaterY, carpLocalZ).applyMatrix4(carpathiaRoot.matrixWorld);
+      shipRoot.worldToLocal(_tmpWorldPos);
+
+      const dx = _tmpWorldPos.x - lb.boatGroup.position.x;
+      const dz = _tmpWorldPos.z - lb.boatGroup.position.z;
+      const dist = Math.hypot(dx, dz);
+      const isMoving = isDocking && dist > 1.1;
+
+      if (isMoving) {
+        const speed = isUnloaded ? 3.8 : 6.4;
+        const step = Math.min(dist, speed * dt);
+        lb.boatGroup.position.x += (dx / dist) * step;
+        lb.boatGroup.position.z += (dz / dist) * step;
+        const targetYaw = Math.atan2(-dx, -dz);
+        let dy = targetYaw - lb.boatGroup.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        lb.boatGroup.rotation.y += dy * Math.min(1, dt * 3.5);
+      }
+
+      lb.boatGroup.position.y = boatWaterY;
+      lb.boatGroup.rotation.x = Math.sin(time * 1.4 + i) * 0.035;
+      lb.boatGroup.rotation.z = Math.cos(time * 1.1 + i) * 0.04;
+
+      const rowAmp = isMoving ? 0.38 : 0.06;
+      const rowSweep = Math.sin(time * (isMoving ? 3.1 : 1.1) + i) * rowAmp;
+      for (let oi = 0; oi < lb.oarsGroup.children.length; oi++) {
+        const oar = lb.oarsGroup.children[oi];
+        oar.rotation.y = rowSweep;
+        oar.rotation.x = Math.cos(time * (isMoving ? 3.1 : 1.1) + i) * (isMoving ? 0.16 : 0.04);
+      }
+
+      // Transfer survivors as boat holds beside Carpathia's ladder
+      const unloadProgress = THREE.MathUtils.clamp(
+        (boardingProgress - tDock) / (tUnloadDone - tDock),
+        0,
+        1,
+      );
+      if (unloadProgress >= 0.85 || dist < 4.5 && boardingProgress >= tUnloadDone * 0.92) {
+        lb.rescued = true;
+      }
+      if (lb.rescued) {
+        boatsRecovered += 1;
+        fractionalSurvivors += 1;
+        lb.occupantsGroup.visible = false;
+      } else {
+        lb.occupantsGroup.visible = true;
+        if (boardingProgress > tDock && dist < 8.5) {
+          fractionalSurvivors += unloadProgress * 0.85;
+        }
+      }
+    }
+
+    const survivorsRescued = Math.min(712, Math.round((fractionalSurvivors / lifeboats.length) * 712));
+    return { boatsRecovered, survivorsRescued };
+  };
+
   const reset = () => {
     for (const ch of characters) {
       const start = ch.route[0];
@@ -2058,6 +2198,7 @@ export function createCrewAndLifeboats(
         lb.homeParent.add(lb.boatGroup);
         lb.detached = false;
       }
+      lb.rescued = false;
       lb.davitForeArm.rotation.set(0, 0, 0);
       lb.davitAftArm.rotation.set(0, 0, 0);
       lb.ropeFore.visible = false;
@@ -2085,6 +2226,7 @@ export function createCrewAndLifeboats(
     lifeboats,
     updateCruising,
     updateSinking,
+    updateRescue,
     reset,
     setLanternPower,
     dispose,

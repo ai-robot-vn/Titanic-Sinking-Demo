@@ -1,11 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Anchor,
   Camera,
   ChevronDown,
   ChevronUp,
+  Clock,
   Compass,
   Droplets,
   FastForward,
+  LifeBuoy,
   Pause,
   Search,
   Volume2,
@@ -28,6 +31,8 @@ interface GameHUDProps {
   onTogglePause: () => void;
   onToggleMute: () => void;
   onSkipSinking: () => void;
+  onFastForwardRescue: () => void;
+  onFocusCarpathia: (enable: boolean) => void;
   onOpenReport: () => void;
   onRestart: () => void;
 }
@@ -35,6 +40,13 @@ interface GameHUDProps {
 function getCardinalLabel(deg: number): string {
   const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
   return dirs[Math.round(deg / 45) % 8];
+}
+
+function formatCountdown(totalSec: number): string {
+  const clamped = Math.max(0, Math.ceil(totalSec));
+  const mins = Math.floor(clamped / 60);
+  const secs = clamped % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
@@ -47,6 +59,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onTogglePause,
   onToggleMute,
   onSkipSinking,
+  onFastForwardRescue,
+  onFocusCarpathia,
   onOpenReport,
   onRestart,
 }) => {
@@ -167,12 +181,53 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             </div>
           ) : isAftermath ? (
             <div className="flex flex-wrap items-center justify-center gap-2">
-              <div className="bg-[#070e18]/92 border border-[#c99c43]/65 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.18em] uppercase text-[#e6c373]">
-                RMS TITANIC LOST BENEATH THE ATLANTIC
-              </div>
-              <div className="bg-[#071526]/92 border border-[#c99c43]/50 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#c7d6e6] tabular-nums">
-                LIFEBOATS ADRIFT: {telemetry.lifeboatsLaunched} / 16
-              </div>
+              {telemetry.carpathiaStage === 'waiting' && (
+                <>
+                  <div className="bg-[#070e18]/92 border border-[#c99c43]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#e6c373] flex items-center gap-1.5 tabular-nums">
+                    <Clock className="w-3.5 h-3.5 text-[#d8b467]" />
+                    RMS CARPATHIA ARRIVES IN {formatCountdown(telemetry.carpathiaEtaSec)}
+                  </div>
+                  <div className="bg-[#071526]/92 border border-[#c99c43]/50 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#c7d6e6] tabular-nums">
+                    LIFEBOATS ADRIFT: {telemetry.lifeboatsLaunched} / 16
+                  </div>
+                </>
+              )}
+
+              {telemetry.carpathiaStage === 'approaching' && (
+                <>
+                  <div className="bg-[#071829]/92 border border-[#38bdf8]/65 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#bae6fd] flex items-center gap-1.5 tabular-nums">
+                    <Anchor className="w-3.5 h-3.5 text-[#38bdf8]" />
+                    RMS CARPATHIA APPROACHING SLOWLY · {telemetry.carpathiaDistanceM} M
+                  </div>
+                  <div className="bg-[#071526]/92 border border-[#c99c43]/50 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#c7d6e6] tabular-nums">
+                    LIFEBOATS ADRIFT: {telemetry.lifeboatsLaunched} / 16
+                  </div>
+                </>
+              )}
+
+              {telemetry.carpathiaStage === 'boarding' && (
+                <>
+                  <div className="bg-[#071f24]/92 border border-[#34d399]/70 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5">
+                    <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
+                    RESCUE IN PROGRESS — BOARDING PASSENGERS
+                  </div>
+                  <div className="bg-[#071526]/92 border border-[#c99c43]/60 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#f3d999] tabular-nums">
+                    SURVIVORS ABOARD: {telemetry.survivorsRescued} / 712 · BOATS: {telemetry.boatsRecovered} / 16
+                  </div>
+                </>
+              )}
+
+              {telemetry.carpathiaStage === 'complete' && (
+                <>
+                  <div className="bg-[#071f1a]/92 border border-[#34d399]/75 px-4 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.16em] uppercase text-[#a7f3d0] flex items-center gap-1.5">
+                    <LifeBuoy className="w-3.5 h-3.5 text-[#34d399]" />
+                    RESCUE COMPLETE — 712 SURVIVORS ABOARD RMS CARPATHIA
+                  </div>
+                  <div className="bg-[#071526]/92 border border-[#c99c43]/55 px-3.5 py-1.5 rounded-sm text-[11px] font-bold tracking-[0.15em] uppercase text-[#e6c373] tabular-nums">
+                    ALL {telemetry.boatsRecovered} LIFEBOATS RECOVERED
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <>
@@ -271,6 +326,45 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       ) : isAftermath ? (
         <div className="flex flex-col items-center gap-2">
           <div className="pointer-events-auto bg-[#070e18]/90 border border-[#c99c43]/55 rounded-sm px-4 py-2.5 flex flex-wrap items-center justify-center gap-2.5 max-w-[95vw]">
+            {telemetry.carpathiaStage === 'waiting' ? (
+              <button
+                type="button"
+                onClick={onFastForwardRescue}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-[2px] border bg-[#0b1626] hover:bg-[#14253d] text-[#bae6fd] border-[#38bdf8]/45 text-[11px] font-bold tracking-[0.14em] uppercase transition-colors cursor-pointer"
+              >
+                <FastForward className="w-3.5 h-3.5" />
+                SKIP 1-MIN WAIT
+              </button>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] tracking-[0.15em] uppercase text-[#9fb2c7] mr-0.5">
+                  FOCUS:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onFocusCarpathia(false)}
+                  className={`px-2.5 py-1 rounded-[2px] border text-[10px] font-bold tracking-[0.12em] uppercase transition-colors cursor-pointer ${
+                    !telemetry.focusCarpathia
+                      ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                      : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/30 hover:border-[#c99c43]/60'
+                  }`}
+                >
+                  LIFEBOAT CLUSTER
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onFocusCarpathia(true)}
+                  className={`px-2.5 py-1 rounded-[2px] border text-[10px] font-bold tracking-[0.12em] uppercase transition-colors cursor-pointer ${
+                    telemetry.focusCarpathia
+                      ? 'bg-[#c99c43] text-[#08101c] border-[#e6c373]'
+                      : 'bg-[#0b1626] text-[#c3d3e5] border-[#c99c43]/30 hover:border-[#c99c43]/60'
+                  }`}
+                >
+                  RMS CARPATHIA
+                </button>
+              </div>
+            )}
+            <div className="h-4 w-[1px] bg-[#c99c43]/30" />
             <button
               type="button"
               onClick={onOpenReport}
@@ -287,7 +381,13 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             </button>
           </div>
           <div className="text-[10px] tracking-[0.16em] uppercase text-[#a9bdd4]/85 bg-[#070e18]/75 px-3 py-0.5 rounded-sm">
-            Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Watch the 16 Lifeboats Adrift
+            {telemetry.carpathiaStage === 'waiting'
+              ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Lifeboats Sending Distress Flares'
+              : telemetry.carpathiaStage === 'approaching'
+                ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · RMS Carpathia Steaming Toward Survivors'
+                : telemetry.carpathiaStage === 'boarding'
+                  ? 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Lifeboats Rowing Alongside Boarding Ladders'
+                  : 'Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · Survivors Safely Aboard RMS Carpathia'}
           </div>
         </div>
       ) : (

@@ -175,6 +175,64 @@ export class SoundEngine {
     });
   }
 
+  public playCarpathiaWhistle(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    // Warm Cunard two-tone steam whistle chord
+    const freqs = [146.83, 185.0];
+    freqs.forEach((f) => {
+      const osc = this.ctx!.createOscillator();
+      const filter = this.ctx!.createBiquadFilter();
+      const gain = this.ctx!.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(f * 0.97, now);
+      osc.frequency.linearRampToValueAtTime(f, now + 0.14);
+
+      filter.type = 'lowpass';
+      filter.frequency.value = 560;
+
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.095, now + 0.12);
+      gain.gain.setValueAtTime(0.09, now + 1.1);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 2.0);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now);
+      osc.stop(now + 2.05);
+    });
+  }
+
+  public playRescueFlare(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const dur = 0.75;
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.25));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(900, now);
+    bp.frequency.exponentialRampToValueAtTime(2200, now + dur);
+    bp.Q.value = 2.0;
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.09, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noise.connect(bp);
+    bp.connect(gain);
+    gain.connect(this.masterGain);
+    noise.start(now);
+  }
+
   public playLookoutBell(): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;

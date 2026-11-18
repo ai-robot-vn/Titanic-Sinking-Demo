@@ -23,6 +23,13 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   compartmentsBreached: 0,
   sinkProgress: 0,
   lifeboatsLaunched: 0,
+  aftermathSeconds: 0,
+  carpathiaStage: 'waiting',
+  carpathiaEtaSec: 60,
+  carpathiaDistanceM: 460,
+  survivorsRescued: 0,
+  boatsRecovered: 0,
+  focusCarpathia: false,
   harborChapterIndex: 0,
   harborProgress: 0,
   harborAutoPlay: true,
@@ -119,6 +126,8 @@ export default function App() {
           onTogglePause={() => engineRef.current?.togglePause()}
           onToggleMute={() => engineRef.current?.toggleMute()}
           onSkipSinking={() => engineRef.current?.skipSinking()}
+          onFastForwardRescue={() => engineRef.current?.fastForwardRescueWait()}
+          onFocusCarpathia={(enable) => engineRef.current?.focusOnCarpathia(enable)}
           onOpenReport={() => engineRef.current?.openVoyageReport()}
           onRestart={() => engineRef.current?.startGame()}
         />

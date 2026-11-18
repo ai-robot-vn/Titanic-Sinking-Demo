@@ -15,6 +15,7 @@ export interface ProceduralTextureSet {
   sprayParticle: THREE.CanvasTexture;
   hullNameplateBow: THREE.CanvasTexture;
   hullNameplateStern: THREE.CanvasTexture;
+  hullNameplateCarpathia: THREE.CanvasTexture;
   whiteStarPennant: THREE.CanvasTexture;
   redEnsignFlag: THREE.CanvasTexture;
   dispose: () => void;
@@ -438,6 +439,20 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   hullNameplateStern.wrapS = THREE.ClampToEdgeWrapping;
   hullNameplateStern.wrapT = THREE.ClampToEdgeWrapping;
 
+  const [carpNameCanvas, carpNameCtx] = makeCanvas(512, 128);
+  carpNameCtx.clearRect(0, 0, 512, 128);
+  carpNameCtx.fillStyle = '#e7bf62';
+  carpNameCtx.strokeStyle = '#6c4d14';
+  carpNameCtx.lineWidth = 2.5;
+  carpNameCtx.font = 'bold 62px Georgia, "Times New Roman", serif';
+  carpNameCtx.textAlign = 'center';
+  carpNameCtx.textBaseline = 'middle';
+  carpNameCtx.strokeText('C A R P A T H I A', 256, 66);
+  carpNameCtx.fillText('C A R P A T H I A', 256, 66);
+  const hullNameplateCarpathia = configureColorTexture(carpNameCanvas, maxAnisotropy, 1, 1);
+  hullNameplateCarpathia.wrapS = THREE.ClampToEdgeWrapping;
+  hullNameplateCarpathia.wrapT = THREE.ClampToEdgeWrapping;
+
   // 10. White Star Line Burgee Pennant (Red swallowtail with 5-pointed white star)
   const [wsCanvas, wsCtx] = makeCanvas(256, 128);
   wsCtx.clearRect(0, 0, 256, 128);
@@ -505,6 +520,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     sprayParticle,
     hullNameplateBow,
     hullNameplateStern,
+    hullNameplateCarpathia,
     whiteStarPennant,
     redEnsignFlag,
     dispose: () => {
@@ -522,6 +538,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       sprayParticle.dispose();
       hullNameplateBow.dispose();
       hullNameplateStern.dispose();
+      hullNameplateCarpathia.dispose();
       whiteStarPennant.dispose();
       redEnsignFlag.dispose();
     },
