@@ -1682,7 +1682,7 @@ export function createCrewAndLifeboats(
 
       const makeDavitArm = (dz: number) => {
         const arm = new THREE.Group();
-        arm.position.set(side * 12.15, 12.82, bz + dz);
+        arm.position.set(side * 12.15, 12.84, bz + dz);
         const swanNeck = new THREE.Mesh(side < 0 ? davitGeoPort : davitGeoStbd, whitePaintMat);
         swanNeck.castShadow = true;
         arm.add(swanNeck);
@@ -1695,11 +1695,22 @@ export function createCrewAndLifeboats(
       const davitForeArm = makeDavitArm(-2.65);
       const davitAftArm = makeDavitArm(2.65);
 
+      // Boat Deck Keel Chock Cradles supporting each stowed lifeboat flush on deck (y = 12.86..13.52)
+      for (const cz of [-1.75, 1.75]) {
+        const chock = new THREE.Mesh(thwartGeo, teakDeckMat);
+        chock.scale.set(0.85, 9.5, 0.72);
+        chock.position.set(side * 12.95, 13.15, bz + cz);
+        homeParent.add(chock);
+      }
+
       const ropeFore = new THREE.Mesh(ropeGeo, ropeMat);
-      ropeFore.visible = false;
+      ropeFore.position.set(side * 13.15, 14.52, bz - 2.65);
+      ropeFore.scale.set(1, 0.92, 1);
       homeParent.add(ropeFore);
+
       const ropeAft = new THREE.Mesh(ropeGeo, ropeMat);
-      ropeAft.visible = false;
+      ropeAft.position.set(side * 13.15, 14.52, bz + 2.65);
+      ropeAft.scale.set(1, 0.92, 1);
       homeParent.add(ropeAft);
 
       const boatGroup = new THREE.Group();
@@ -2201,8 +2212,12 @@ export function createCrewAndLifeboats(
       lb.rescued = false;
       lb.davitForeArm.rotation.set(0, 0, 0);
       lb.davitAftArm.rotation.set(0, 0, 0);
-      lb.ropeFore.visible = false;
-      lb.ropeAft.visible = false;
+      lb.ropeFore.visible = true;
+      lb.ropeFore.position.set(lb.side * 13.15, 14.52, lb.baseZ - 2.65);
+      lb.ropeFore.scale.set(1, 0.92, 1);
+      lb.ropeAft.visible = true;
+      lb.ropeAft.position.set(lb.side * 13.15, 14.52, lb.baseZ + 2.65);
+      lb.ropeAft.scale.set(1, 0.92, 1);
       lb.occupantsGroup.visible = false;
       lb.oarsGroup.visible = false;
       lb.lanternMesh.visible = false;

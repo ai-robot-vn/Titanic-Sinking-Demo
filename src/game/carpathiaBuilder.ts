@@ -63,34 +63,123 @@ function buildLoftedHull(
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
-  const ringPts = yLevels * 2 + 1;
+  const includeKeel = yMinFrac <= 0.001;
+
+  const evalVertex = (z: number, side: number, frac: number): [number, number, number, number, number] => {
+    const { beam, sheerY, flare } = sampleCarpathiaStation(z);
+    const vCoord = (z + 85) / 170;
+    const y = THREE.MathUtils.lerp(-5.2, sheerY, frac);
+    let widthRatio: number;
+    if (frac < 0.28) {
+      widthRatio = Math.sin(((frac / 0.28) * Math.PI) / 2) * 0.88;
+    } else {
+      const up = (frac - 0.28) / 0.72;
+      widthRatio = 0.88 + up * 0.12 + up * up * flare;
+    }
+    const bowRake = z <= -82 ? -(frac * 1.3) : 0;
+    return [side * beam * widthRatio, y, z + bowRake, vCoord * 6, frac];
+  };
+
+  if (includeKeel) {
+    const ringPts = yLevels * 2 + 1;
+    for (let zi = 0; zi < zSamples.length; zi++) {
+      const z = zSamples[zi];
+      for (let j = yLevels; j >= 1; j--) {
+        const frac = THREE.MathUtils.lerp(yMinFrac, yMaxFrac, j / yLevels);
+        const [x, y, zz, u, v] = evalVertex(z, -1, frac);
+        positions.push(x, y, zz);
+        uvs.push(u, v);
+      }
+      const [kx, ky, kz, ku, kv] = evalVertex(z, 0, yMinFrac);
+      positions.push(kx, ky, kz);
+      uvs.push(ku, kv);
+      for (let j = 1; j <= yLevels; j++) {
+        const frac = THREE.MathUtils.lerp(yMinFrac, yMaxFrac, j / yLevels);
+        const [x, y, zz, u, v] = evalVertex(z, 1, frac);
+        positions.push(x, y, zz);
+        uvs.push(u, v);
+      }
+    }
+    for (let zi = 0; zi < zSamples.length - 1; zi++) {
+      for (let ri = 0; ri < ringPts - 1; ri++) {
+        const a = zi * ringPts + ri;
+        const b = (zi + 1) * ringPts + ri;
+        const c = (zi + 1) * ringPts + (ri + 1);
+        const d = zi * ringPts + (ri + 1);
+        indices.push(a, b, d);
+        indices.push(b, c, d);
+      }
+    }
+  } else {
+    const sidePts = yLevels + 1;
+    for (const side of [-1, 1] as const) {
+      const baseVertex = positions.length / 3;
+      for (let zi = 0; zi < zSamples.length; zi++) {
+        const z = zSamples[zi];
+        for (let j = 0; j <= yLevels; j++) {
+          const frac = THREE.MathUtils.lerp(yMinFrac, yMaxFrac, j / yLevels);
+          const [x, y, zz, u, v] = evalVertex(z, side, frac);
+          positions.push(x, y, zz);
+          uvs.push(u, v);
+        }
+      }
+      for (let zi = 0; zi < zSamples.length - 1; zi++) {
+        for (let ri = 0; ri < sidePts - 1; ri++) {
+          const a = baseVertex + zi * sidePts + ri;
+          const b = baseVertex + (zi + 1) * sidePts + ri;
+          const c = baseVertex + (zi + 1) * sidePts + (ri + 1);
+          const d = baseVertex + zi * sidePts + (ri + 1);
+          if (side > 0) {
+            indices.push(a, b, d);
+            indices.push(b, c, d);
+          } else {
+            indices.push(a, d, b);
+            indices.push(b, d, c);
+          }
+        }
+      }
+    }
+  }
+
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function buildCarpathiaWeatherDeck(
+  zSamples: number[],
+  yTopOffset = 0.06,
+  thickness = 0.36,
+  edgeExpand = 0.0,
+): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const ringPts = 5;
 
   for (let zi = 0; zi < zSamples.length; zi++) {
     const z = zSamples[zi];
     const { beam, sheerY, flare } = sampleCarpathiaStation(z);
+    const halfW = Math.max(0.05, beam * (1 + flare) + edgeExpand);
+    const bowRake = z <= -82 ? -1.3 : 0;
+    const zz = z + bowRake;
+    const yTop = sheerY + yTopOffset;
+    const yBot = yTop - thickness;
     const vCoord = (z + 85) / 170;
 
-    const addVertex = (side: number, frac: number) => {
-      const y = THREE.MathUtils.lerp(-5.2, sheerY, frac);
-      let widthRatio: number;
-      if (frac < 0.28) {
-        widthRatio = Math.sin(((frac / 0.28) * Math.PI) / 2) * 0.88;
-      } else {
-        const up = (frac - 0.28) / 0.72;
-        widthRatio = 0.88 + up * 0.12 + up * up * flare;
-      }
-      const bowRake = z <= -82 ? -(frac * 1.3) : 0;
-      positions.push(side * beam * widthRatio, y, z + bowRake);
-      uvs.push(vCoord * 6, frac);
-    };
-
-    for (let j = yLevels; j >= 1; j--) {
-      addVertex(-1, THREE.MathUtils.lerp(yMinFrac, yMaxFrac, j / yLevels));
-    }
-    addVertex(0, yMinFrac);
-    for (let j = 1; j <= yLevels; j++) {
-      addVertex(1, THREE.MathUtils.lerp(yMinFrac, yMaxFrac, j / yLevels));
-    }
+    positions.push(-halfW, yBot, zz);
+    uvs.push(0, vCoord * 9);
+    positions.push(-halfW, yTop, zz);
+    uvs.push(0.15, vCoord * 9);
+    positions.push(0, yTop + 0.06, zz);
+    uvs.push(0.5, vCoord * 9);
+    positions.push(halfW, yTop, zz);
+    uvs.push(0.85, vCoord * 9);
+    positions.push(halfW, yBot, zz);
+    uvs.push(1.0, vCoord * 9);
   }
 
   for (let zi = 0; zi < zSamples.length - 1; zi++) {
@@ -103,6 +192,21 @@ function buildLoftedHull(
       indices.push(b, c, d);
     }
   }
+
+  const addCap = (zi: number, flip: boolean) => {
+    const base = zi * ringPts;
+    if (flip) {
+      indices.push(base + 0, base + 1, base + 2);
+      indices.push(base + 0, base + 2, base + 3);
+      indices.push(base + 0, base + 3, base + 4);
+    } else {
+      indices.push(base + 0, base + 2, base + 1);
+      indices.push(base + 0, base + 3, base + 2);
+      indices.push(base + 0, base + 4, base + 3);
+    }
+  };
+  addCap(0, false);
+  addCap(zSamples.length - 1, true);
 
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
@@ -241,21 +345,21 @@ export function buildCarpathiaShip(
   const stayMat = trackMat(new THREE.MeshBasicMaterial({ color: 0x4b5868 }));
 
   // =========================================================================
-  // 1. LOFTED 170m CUNARD HULL, DECKS & SUPERSTRUCTURE
+  // 1. LOFTED 170m CUNARD HULL, WEATHER DECKS, RAILINGS & SUPERSTRUCTURE
   // =========================================================================
   const zStations = [
-    -85, -80, -72, -62, -50, -40, -30, -16, 0, 18, 36, 52, 66, 77, 85,
+    -85, -80, -72, -62, -50, -48.2, -48, -40, -30.2, -30, -16, 0, 18, 36, 51.8, 52, 66, 77, 85,
   ];
   const upperHull = new THREE.Mesh(trackGeo(buildLoftedHull(zStations, 7, 0.36, 1.0)), steelHullMat);
   upperHull.castShadow = !isSoftwareGl;
   upperHull.receiveShadow = true;
   root.add(upperHull);
 
-  const lowerHull = new THREE.Mesh(trackGeo(buildLoftedHull(zStations, 4, 0.0, 0.39)), antiFoulMat);
-  lowerHull.scale.set(0.996, 1, 0.998);
+  const lowerHull = new THREE.Mesh(trackGeo(buildLoftedHull(zStations, 4, 0.0, 0.37)), antiFoulMat);
+  lowerHull.scale.set(0.999, 1, 0.9995);
   root.add(lowerHull);
 
-  // Bow gold "CARPATHIA" nameplates on port & starboard flare
+  // Bow gold "CARPATHIA" nameplates flush against port & starboard flare
   const carpNameMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.hullNameplateCarpathia,
@@ -274,70 +378,195 @@ export function buildCarpathiaShip(
   const carpBowYaw = Math.atan2(cb2 - cb1, 6.0);
   for (const side of [-1, 1] as const) {
     const plate = new THREE.Mesh(nameGeo, carpNameMat);
-    plate.position.set(side * ((cb1 + cb2) * 0.5 + 0.35), 6.2, -70.0);
+    plate.position.set(side * ((cb1 + cb2) * 0.5 + 0.06), 6.2, -70.0);
     plate.rotation.y = (side > 0 ? Math.PI / 2 : -Math.PI / 2) + side * carpBowYaw;
     root.add(plate);
   }
 
-  // Forecastle, Main Promenade & Poop Teak Decks
-  const foreDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(7.8, -82, -48, 0.22, 3.2)), teakMat);
-  foreDeck.position.y = 7.3;
+  // Hull-conforming Forecastle, Forward Well Deck, Midships Weather Deck & Poop Teak Decks
+  const foreDeck = new THREE.Mesh(
+    trackGeo(buildCarpathiaWeatherDeck([-85, -80, -72, -62, -52, -48], 0.05, 0.4, -0.02)),
+    teakMat,
+  );
   root.add(foreDeck);
 
-  const mainPromenade = new THREE.Mesh(trackGeo(buildCurvedHouse(9.5, -30, 52, 0.24, 1.4)), teakMat);
-  mainPromenade.position.y = 5.6;
+  const fwdWellDeck = new THREE.Mesh(
+    trackGeo(buildCarpathiaWeatherDeck([-48, -43, -37, -30], 0.06, 0.38, -0.02)),
+    teakMat,
+  );
+  root.add(fwdWellDeck);
+
+  const mainPromenade = new THREE.Mesh(
+    trackGeo(buildCarpathiaWeatherDeck([-30, -16, 0, 18, 36, 52], 0.06, 0.42, 0.0)),
+    teakMat,
+  );
   root.add(mainPromenade);
 
-  const poopDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(7.6, 52, 84, 0.22, 2.2)), teakMat);
-  poopDeck.position.y = 6.6;
+  const poopDeck = new THREE.Mesh(
+    trackGeo(buildCarpathiaWeatherDeck([52, 60, 70, 79, 85], 0.06, 0.4, -0.02)),
+    teakMat,
+  );
   root.add(poopDeck);
 
-  // Midships Superstructure (Bridge Deck & Boat Deck)
-  const bHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(8.9, -24, 44, 2.55, 1.0)), whiteMat);
-  bHouse.position.y = 5.82;
+  // Break Bulkhead Walls sealing Forecastle-to-Well (-48), Well-to-Midships (-30) & Midships-to-Poop (+52)
+  const foreBreakWall = new THREE.Mesh(trackGeo(buildCurvedHouse(8.4, -48.4, -47.6, 2.35, 0.15)), whiteMat);
+  foreBreakWall.position.y = 5.35;
+  root.add(foreBreakWall);
+
+  const wellHatchCoaming = new THREE.Mesh(trackGeo(buildCurvedHouse(2.5, -42.5, -35.5, 0.72, 0.25)), whiteMat);
+  wellHatchCoaming.position.y = 5.42;
+  root.add(wellHatchCoaming);
+  const wellHatchCover = new THREE.Mesh(trackGeo(buildCurvedHouse(2.3, -42.2, -35.8, 0.2, 0.2)), teakMat);
+  wellHatchCover.position.y = 6.14;
+  root.add(wellHatchCover);
+
+  const poopBreakWall = new THREE.Mesh(trackGeo(buildCurvedHouse(8.6, 51.6, 52.5, 1.4, 0.15)), whiteMat);
+  poopBreakWall.position.y = 5.5;
+  root.add(poopBreakWall);
+
+  // Hull-conforming Perimeter Railings on Forecastle, Well Deck, Boat Deck & Poop
+  const addCarpRailSeg = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dz = z2 - z1;
+    const len = Math.hypot(dx, dy, dz);
+    for (const off of [0.36, 0.68, 0.98]) {
+      const bar = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(0.036, 0.036, len, 6)),
+        off > 0.9 ? teakMat : whiteMat,
+      );
+      bar.position.set((x1 + x2) * 0.5, (y1 + y2) * 0.5 + off, (z1 + z2) * 0.5);
+      bar.rotation.x = Math.PI / 2;
+      bar.rotation.z = -Math.atan2(dx, dz);
+      root.add(bar);
+    }
+  };
+  const addCarpHullRail = (zList: number[]) => {
+    for (const side of [-1, 1] as const) {
+      for (let i = 0; i < zList.length; i++) {
+        const z = zList[i];
+        const { beam, sheerY, flare } = sampleCarpathiaStation(z);
+        const rx = side * Math.max(0, beam * (1 + flare) - 0.15);
+        const ry = sheerY + 0.06;
+        const post = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.045, 0.045, 1.0, 6)), whiteMat);
+        post.position.set(rx, ry + 0.5, z <= -82 ? z - 1.25 : z);
+        root.add(post);
+        if (i < zList.length - 1) {
+          const nz = zList[i + 1];
+          const nxSt = sampleCarpathiaStation(nz);
+          const nrx = side * Math.max(0, nxSt.beam * (1 + nxSt.flare) - 0.15);
+          addCarpRailSeg(
+            rx,
+            ry,
+            z <= -82 ? z - 1.25 : z,
+            nrx,
+            nxSt.sheerY + 0.06,
+            nz <= -82 ? nz - 1.25 : nz,
+          );
+        }
+      }
+    }
+  };
+  addCarpHullRail([-84.5, -76, -65, -55, -48.3]);
+  addCarpHullRail([-47.5, -39, -30.5]);
+  addCarpHullRail([52.5, 62, 72, 80, 84.5]);
+
+  // Midships Superstructure (Bridge Deck, Boat Deck & Promenade Roof)
+  const bHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(8.9, -29.0, 46.0, 2.8, 1.0)), whiteMat);
+  bHouse.position.y = 5.62;
   bHouse.castShadow = !isSoftwareGl;
   root.add(bHouse);
 
-  const boatDeckFloor = new THREE.Mesh(trackGeo(buildCurvedHouse(9.35, -25, 45, 0.24, 1.0)), teakMat);
-  boatDeckFloor.position.y = 8.35;
+  const boatDeckFloor = new THREE.Mesh(trackGeo(buildCurvedHouse(9.35, -29.5, 46.5, 0.26, 1.0)), teakMat);
+  boatDeckFloor.position.y = 8.42;
   root.add(boatDeckFloor);
 
-  const aHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(7.1, -21, 38, 2.4, 0.8)), whiteMat);
-  aHouse.position.y = 8.58;
+  // Boat Deck Teak-Capped Railings
+  for (const side of [-1, 1] as const) {
+    addCarpRailSeg(side * 9.2, 8.68, -28.0, side * 9.2, 8.68, 45.0);
+    for (let pz = -26; pz <= 44; pz += 7.0) {
+      const bPost = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.045, 0.045, 0.98, 6)), whiteMat);
+      bPost.position.set(side * 9.2, 9.16, pz);
+      root.add(bPost);
+    }
+  }
+
+  const aHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(7.1, -21.5, 38.5, 2.45, 0.7)), whiteMat);
+  aHouse.position.y = 8.66;
   root.add(aHouse);
 
-  // Wheelhouse & Cantilevered Bridge Wings (z = -20)
-  const bridgeHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(4.2, -23.5, -18.5, 2.35, 0.5)), whiteMat);
-  bridgeHouse.position.y = 10.95;
-  root.add(bridgeHouse);
+  // Solid Deckhouse Roof above A-House sealing funnel fidley & bridge base cleanly
+  const aDeckRoof = new THREE.Mesh(trackGeo(buildCurvedHouse(7.35, -22.0, 39.0, 0.24, 0.7)), teakMat);
+  aDeckRoof.position.y = 11.1;
+  root.add(aDeckRoof);
 
-  const bridgeWingDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(10.8, -23.2, -20.2, 0.26, 0.3)), teakMat);
-  bridgeWingDeck.position.y = 10.85;
+  // Wheelhouse, Enclosed Bridge Wing Cabs & Cantilevered Support Knees (z = -20)
+  const bridgeWingDeck = new THREE.Mesh(trackGeo(buildCurvedHouse(10.8, -23.2, -20.0, 0.28, 0.25)), teakMat);
+  bridgeWingDeck.position.y = 11.08;
   root.add(bridgeWingDeck);
 
-  const bridgeWindows = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(7.6, 0.72, 0.2)), warmGlowMat);
-  bridgeWindows.position.set(0, 12.25, -23.5);
-  root.add(bridgeWindows);
+  // Support pillars & knees under the forward bridge overhang (-23.2 to -21.5)
+  for (const sx of [-6.8, -3.6, 3.6, 6.8]) {
+    const sup = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.11, 0.14, 2.65, 8)), whiteMat);
+    sup.position.set(sx, 9.85, -22.2);
+    root.add(sup);
+  }
+
+  const bridgeHouse = new THREE.Mesh(trackGeo(buildCurvedHouse(4.2, -23.3, -18.5, 2.38, 0.35)), whiteMat);
+  bridgeHouse.position.y = 11.32;
+  root.add(bridgeHouse);
+
+  const bridgeRoof = new THREE.Mesh(trackGeo(buildCurvedHouse(4.4, -23.5, -18.3, 0.18, 0.35)), teakMat);
+  bridgeRoof.position.y = 13.7;
+  root.add(bridgeRoof);
+
+  // Curved glowing bridge windows flush across front face of bridgeHouse
+  const bridgeWinCenter = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.6, 0.68, 0.14)), warmGlowMat);
+  bridgeWinCenter.position.set(0, 12.65, -23.32);
+  root.add(bridgeWinCenter);
+
+  // Searchlight projector pedestal & barrel atop Carpathia's wheelhouse roof
+  const slBase = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.22, 0.36, 10)), brassMat);
+  slBase.position.set(-4.5, 13.78, -21.0);
+  root.add(slBase);
 
   for (const side of [-1, 1] as const) {
+    // Wing front dodger wall spanning seamlessly from bridgeHouse (4.2m) to wing cab (10.75m)
+    const wingWall = new THREE.Mesh(trackGeo(buildCurvedHouse(3.3, -23.15, -22.8, 1.12, 0.1)), whiteMat);
+    wingWall.position.set(side * 7.45, 11.34, 0);
+    root.add(wingWall);
+
+    // Aft bridge wing railing
+    addCarpRailSeg(side * 4.2, 11.36, -20.1, side * 10.65, 11.36, -20.1);
+
+    // Enclosed Wing Cab supporting port/starboard navigation lights (no floating spheres!)
+    const wingCab = new THREE.Mesh(trackGeo(buildCurvedHouse(0.42, -23.1, -20.1, 1.18, 0.15)), whiteMat);
+    wingCab.position.set(side * 10.55, 11.34, 0);
+    root.add(wingCab);
+
     const nav = new THREE.Mesh(
       trackGeo(new THREE.SphereGeometry(0.24, 10, 10)),
       side < 0 ? portRedMat : stbdGreenMat,
     );
-    nav.position.set(side * 10.7, 12.0, -22.2);
+    nav.position.set(side * 10.65, 12.62, -22.4);
     root.add(nav);
   }
 
   // =========================================================================
-  // 2. SINGLE TOWERING CUNARD RED-AND-BLACK FUNNEL + 4 SCHOONER MASTS
+  // 2. SINGLE TOWERING CUNARD FUNNEL + FIDLEY CASING + 4 TILTED SCHOONER MASTS
   // =========================================================================
+  // Boiler Fidley Casing anchoring funnel seamlessly onto A-Deck roof
+  const fidleyBase = new THREE.Mesh(trackGeo(buildCurvedHouse(2.9, 1.6, 10.4, 0.95, 0.5)), whiteMat);
+  fidleyBase.position.y = 11.2;
+  root.add(fidleyBase);
+
   const funnelGroup = new THREE.Group();
-  funnelGroup.position.set(0, 10.95, 6.0);
+  funnelGroup.position.set(0, 11.45, 6.0);
   funnelGroup.rotation.x = 0.075;
   funnelGroup.scale.set(0.86, 1, 1.15);
 
-  const funnelShaft = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(2.15, 2.48, 12.5, 28)), cunardRedMat);
-  funnelShaft.position.y = 6.25;
+  const funnelShaft = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(2.15, 2.52, 13.4, 28)), cunardRedMat);
+  funnelShaft.position.y = 5.8;
   funnelShaft.castShadow = !isSoftwareGl;
   funnelGroup.add(funnelShaft);
 
@@ -345,60 +574,138 @@ export function buildCarpathiaShip(
   topBlackBand.position.y = 13.8;
   funnelGroup.add(topBlackBand);
 
+  const funnelTopLip = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(2.18, 0.11, 8, 28)), blackBandMat);
+  funnelTopLip.rotation.x = Math.PI / 2;
+  funnelTopLip.position.y = 15.32;
+  funnelGroup.add(funnelTopLip);
+
+  const funnelFlueCap = new THREE.Mesh(trackGeo(new THREE.CircleGeometry(2.02, 24)), blackBandMat);
+  funnelFlueCap.rotation.x = -Math.PI / 2;
+  funnelFlueCap.position.y = 15.18;
+  funnelGroup.add(funnelFlueCap);
+
   for (const by of [8.2, 10.4]) {
     const thinBand = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(2.3, 2.32, 0.36, 28)), blackBandMat);
     thinBand.position.y = by;
     funnelGroup.add(thinBand);
   }
 
-  const whistlePipe = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.12, 0.14, 14.0, 8)), brassMat);
-  whistlePipe.position.set(0, 7.2, -2.38);
+  const whistlePipe = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.12, 0.14, 14.8, 8)), brassMat);
+  whistlePipe.position.set(0, 6.8, -2.38);
   funnelGroup.add(whistlePipe);
   root.add(funnelGroup);
 
-  // 4 Tall Cunard Schooner Masts (z = -46, -15, 28, 60) + Steaming Lights + Aerials
+  // Funnel steel guy wires anchored down to Boat Deck
+  for (const [tx, tz, bx, bz] of [
+    [-1.8, 4.8, -8.5, 2.0],
+    [1.8, 4.8, 8.5, 2.0],
+    [-1.8, 7.6, -8.5, 11.5],
+    [1.8, 7.6, 8.5, 11.5],
+  ]) {
+    const guy = new THREE.Mesh(
+      trackGeo(
+        new THREE.TubeGeometry(
+          new THREE.LineCurve3(new THREE.Vector3(tx, 24.4, tz + 1.0), new THREE.Vector3(bx, 8.72, bz)),
+          3,
+          0.028,
+          5,
+          false,
+        ),
+      ),
+      stayMat,
+    );
+    root.add(guy);
+  }
+
+  // 4 Tall Cunard Schooner Masts (z = -46, -15, 28, 60) built in tilted MastGroups so yards/lamps/aerials never float
   const mastZList = [-46.0, -15.0, 28.0, 60.0];
-  const mastGeo = trackGeo(new THREE.CylinderGeometry(0.14, 0.3, 31.0, 12));
+  const mastTilt = 0.05;
+  const mastGeo = trackGeo(new THREE.CylinderGeometry(0.14, 0.3, 31.6, 12));
+  const mastCollarGeo = trackGeo(new THREE.CylinderGeometry(0.4, 0.54, 0.65, 12));
   const lanternGeo = trackGeo(new THREE.SphereGeometry(0.24, 10, 10));
+  const mastTops: Array<THREE.Vector3> = [];
+
   for (let m = 0; m < mastZList.length; m++) {
     const mz = mastZList[m];
+    const baseY = m === 0 ? 5.2 : m === 3 ? 6.4 : 11.1;
+    const mastGrp = new THREE.Group();
+    mastGrp.position.set(0, baseY, mz);
+    mastGrp.rotation.x = mastTilt;
+
+    const collar = new THREE.Mesh(mastCollarGeo, whiteMat);
+    collar.position.y = 0.32;
+    mastGrp.add(collar);
+
+    const mastLenAboveBase = 36.5 - baseY;
     const mast = new THREE.Mesh(mastGeo, mastBuffMat);
-    mast.position.set(0, 21.0, mz);
-    mast.rotation.x = 0.05;
-    root.add(mast);
+    mast.scale.y = mastLenAboveBase / 31.6;
+    mast.position.y = mastLenAboveBase * 0.5;
+    mastGrp.add(mast);
 
     if (m === 0 || m === 2) {
       const yard = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.06, 0.09, 9.6, 8)), mastBuffMat);
       yard.rotation.z = Math.PI / 2;
-      yard.position.set(0, 27.5, mz);
-      root.add(yard);
+      yard.position.set(0, 27.5 - baseY, 0);
+      mastGrp.add(yard);
 
       const mastLamp = new THREE.Mesh(lanternGeo, warmGlowMat);
-      mastLamp.position.set(0, 25.0, mz - 0.3);
-      root.add(mastLamp);
+      mastLamp.position.set(0, 25.0 - baseY, -0.26);
+      mastGrp.add(mastLamp);
     }
+    root.add(mastGrp);
 
-    for (const sx of [-7.5, 7.5]) {
+    // Exact top & mid-mast coordinates along tilted axis for shrouds and wireless aerials
+    const topWorldY = baseY + mastLenAboveBase * Math.cos(mastTilt);
+    const topWorldZ = mz + mastLenAboveBase * Math.sin(mastTilt);
+    mastTops.push(new THREE.Vector3(0, topWorldY, topWorldZ));
+
+    const stayH = 29.0 - baseY;
+    const stayY = baseY + stayH * Math.cos(mastTilt);
+    const stayZ = mz + stayH * Math.sin(mastTilt);
+    const anchorY = m === 0 ? 5.4 : m === 3 ? 6.6 : 8.72;
+    const anchorX = m === 0 ? 8.0 : m === 3 ? 6.8 : 9.1;
+    for (const sx of [-anchorX, anchorX]) {
       const stay = new THREE.Mesh(
-        trackGeo(new THREE.TubeGeometry(new THREE.LineCurve3(new THREE.Vector3(0, 31, mz), new THREE.Vector3(sx, 6.5, mz + 3)), 3, 0.03, 5, false)),
+        trackGeo(
+          new THREE.TubeGeometry(
+            new THREE.LineCurve3(new THREE.Vector3(0, stayY, stayZ), new THREE.Vector3(sx, anchorY, mz + 3)),
+            3,
+            0.03,
+            5,
+            false,
+          ),
+        ),
         stayMat,
       );
       root.add(stay);
     }
   }
-  for (const ax of [-0.6, 0.6]) {
+  for (const ax of [-0.45, 0.45]) {
     const aerial = new THREE.Mesh(
-      trackGeo(new THREE.TubeGeometry(new THREE.LineCurve3(new THREE.Vector3(ax, 36.2, -46), new THREE.Vector3(ax, 35.8, 60)), 3, 0.024, 5, false)),
+      trackGeo(
+        new THREE.TubeGeometry(
+          new THREE.LineCurve3(
+            new THREE.Vector3(ax, mastTops[0].y - 0.3, mastTops[0].z),
+            new THREE.Vector3(ax, mastTops[3].y - 0.3, mastTops[3].z),
+          ),
+          3,
+          0.024,
+          5,
+          false,
+        ),
+      ),
       stayMat,
     );
     root.add(aerial);
   }
 
-  // Stern Red Ensign Flag
+  // Stern Red Ensign Flag (assembled in tilted staff group so flag never separates)
+  const ensignGroup = new THREE.Group();
+  ensignGroup.position.set(0, 6.8, 83.8);
+  ensignGroup.rotation.x = 0.18;
   const ensignStaff = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.04, 0.07, 5.2, 8)), whiteMat);
-  ensignStaff.position.set(0, 9.5, 83.8);
-  ensignStaff.rotation.x = 0.18;
-  root.add(ensignStaff);
+  ensignStaff.position.y = 2.6;
+  ensignGroup.add(ensignStaff);
   const ensignFlag = new THREE.Mesh(
     trackGeo(new THREE.PlaneGeometry(2.8, 1.4)),
     trackMat(
@@ -409,9 +716,36 @@ export function buildCarpathiaShip(
       }),
     ),
   );
-  ensignFlag.position.set(0.05, 11.2, 85.4);
-  ensignFlag.rotation.y = Math.PI / 2 + 0.1;
-  root.add(ensignFlag);
+  ensignFlag.position.set(0.02, 4.4, 1.4);
+  ensignFlag.rotation.y = Math.PI / 2;
+  ensignGroup.add(ensignFlag);
+  root.add(ensignGroup);
+
+  // 8 Stowed Cunard Lifeboats in Welin Davits along Boat Deck (z = -10, 4, 18, 32)
+  const cBoatHullGeo = trackGeo(buildCurvedHouse(0.85, -2.7, 2.7, 0.65, 0.9));
+  const cDavitCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0.2, 1.2, 0),
+    new THREE.Vector3(0.75, 1.85, 0),
+  ]);
+  const cDavitGeo = trackGeo(new THREE.TubeGeometry(cDavitCurve, 8, 0.07, 6, false));
+  for (const side of [-1, 1] as const) {
+    for (const lbz of [-10, 4, 18, 32]) {
+      for (const dz of [-2.3, 2.3]) {
+        const dv = new THREE.Mesh(cDavitGeo, whiteMat);
+        dv.position.set(side * 8.15, 8.65, lbz + dz);
+        dv.scale.x = side;
+        root.add(dv);
+      }
+      const chock = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.1, 0.42, 3.6)), teakMat);
+      chock.position.set(side * 8.65, 8.85, lbz);
+      root.add(chock);
+
+      const cb = new THREE.Mesh(cBoatHullGeo, whiteMat);
+      cb.position.set(side * 8.65, 9.05, lbz);
+      root.add(cb);
+    }
+  }
 
   // =========================================================================
   // 3. WARM PORTHOLES, RESCUE FLOODLIGHTS & 4 BOARDING GANGWAY LADDERS
@@ -421,25 +755,29 @@ export function buildCarpathiaShip(
   for (const side of [-1, 1]) {
     for (let z = -66; z <= 74; z += 4.5) {
       const { beam, sheerY } = sampleCarpathiaStation(z);
+      const { beam: beamNext } = sampleCarpathiaStation(z + 1.5);
+      const slopeAngle = Math.atan2((beamNext - beam) * side, 1.5);
       phCoords.push({
-        x: side * (beam * 0.99 + 0.08),
+        x: side * (beam * 0.99 + 0.05),
         y: sheerY - 1.5,
         z,
-        ry: side > 0 ? Math.PI / 2 : -Math.PI / 2,
+        ry: (side > 0 ? Math.PI / 2 : -Math.PI / 2) - slopeAngle,
         sx: 1,
       });
     }
-    for (let z = -22; z <= 40; z += 3.2) {
+    for (let z = -27; z <= 44; z += 3.2) {
       phCoords.push({
-        x: side * 9.0,
-        y: 7.15,
+        x: side * 8.97,
+        y: 7.12,
         z,
         ry: side > 0 ? Math.PI / 2 : -Math.PI / 2,
         sx: 1.7,
       });
+    }
+    for (let z = -20; z <= 37; z += 3.2) {
       phCoords.push({
-        x: side * 7.2,
-        y: 9.85,
+        x: side * 7.17,
+        y: 9.88,
         z,
         ry: side > 0 ? Math.PI / 2 : -Math.PI / 2,
         sx: 1.7,
@@ -469,7 +807,7 @@ export function buildCarpathiaShip(
   root.add(rescueTarget);
 
   const rescueSpot = new THREE.SpotLight(0xedf7ff, 120, 260, Math.PI / 8, 0.55, 1.1);
-  rescueSpot.position.set(-4.5, 13.5, -21.0);
+  rescueSpot.position.set(-4.5, 14.0, -21.0);
   rescueSpot.target = rescueTarget;
   root.add(rescueSpot);
 
@@ -485,27 +823,33 @@ export function buildCarpathiaShip(
   const ropeRailGeo = trackGeo(new THREE.CylinderGeometry(0.035, 0.035, 6.2, 6));
   const rungGeo = trackGeo(new THREE.BoxGeometry(0.18, 0.06, 0.95));
   const stageGeo = trackGeo(new THREE.BoxGeometry(1.1, 0.14, 1.6));
+  const upperLandingGeo = trackGeo(new THREE.BoxGeometry(1.5, 0.16, 1.8));
 
   for (const st of boardingStationsLocal) {
     const g = new THREE.Group();
     g.position.set(st.side * 9.85, 3.2, st.z);
 
+    // Upper deck-to-ladder landing bridge spanning from promenade deck edge out to the ladder top
+    const upperLanding = new THREE.Mesh(upperLandingGeo, teakMat);
+    upperLanding.position.set(-st.side * 0.4, 2.48, 0);
+    g.add(upperLanding);
+
     for (const rz of [-0.42, 0.42]) {
       const rope = new THREE.Mesh(ropeRailGeo, stayMat);
-      rope.position.set(st.side * 0.15, 0, rz);
+      rope.position.set(st.side * 0.25, 0, rz);
       g.add(rope);
     }
     for (let r = 0; r < 11; r++) {
       const rung = new THREE.Mesh(rungGeo, teakMat);
-      rung.position.set(st.side * 0.15, -2.5 + r * 0.52, 0);
+      rung.position.set(st.side * 0.25, -2.5 + r * 0.52, 0);
       g.add(rung);
     }
     const stage = new THREE.Mesh(stageGeo, teakMat);
-    stage.position.set(st.side * 0.45, -2.4, 0);
+    stage.position.set(st.side * 0.55, -2.4, 0);
     g.add(stage);
 
     const lamp = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.18, 8, 8)), warmGlowMat);
-    lamp.position.set(st.side * 0.45, -1.65, 0.65);
+    lamp.position.set(st.side * 0.55, -1.65, 0.65);
     g.add(lamp);
 
     laddersGroup.add(g);
@@ -556,19 +900,19 @@ export function buildCarpathiaShip(
         onLadder: i % boardingStationsLocal.length,
       });
     } else if (i % 3 === 0) {
-      // Boat Deck lining railings
+      // Boat Deck lining railings (y = 8.68 flush on boatDeckFloor)
       survivorSpots.push({
-        x: side * (7.6 + ((i * 13) % 14) * 0.1),
-        y: 8.6,
+        x: side * (7.6 + ((i * 13) % 13) * 0.1),
+        y: 8.68,
         z: -22 + ((i * 19) % 62),
         ry: side > 0 ? -Math.PI / 2 : Math.PI / 2,
         phase: i * 1.3,
       });
     } else {
-      // Main Promenade & Forecastle/Well deck
+      // Main Promenade & Weather deck (y = 5.66 flush on mainPromenade)
       survivorSpots.push({
-        x: side * (7.2 + ((i * 11) % 18) * 0.1),
-        y: 5.84,
+        x: side * (7.2 + ((i * 11) % 17) * 0.1),
+        y: 5.66,
         z: -28 + ((i * 23) % 74),
         ry: side > 0 ? -Math.PI / 2 : Math.PI / 2,
         phase: i * 1.1,
@@ -601,7 +945,7 @@ export function buildCarpathiaShip(
   root.add(survHeadInst);
   root.add(survVestInst);
 
-  // Carpathia's own 18 visible deck crewmen always standing on bridge wings, bow & gangways
+  // Carpathia's own 18 visible deck crewmen always standing flush on bridge wings, bow & gangways
   const crewCount = 18;
   const crewBodyInst = new THREE.InstancedMesh(bodyGeo, bodyMat, crewCount);
   const crewHeadInst = new THREE.InstancedMesh(headGeo, headMat, crewCount);
@@ -614,24 +958,24 @@ export function buildCarpathiaShip(
   if (crewBodyInst.instanceColor) crewBodyInst.instanceColor.needsUpdate = true;
 
   const crewSpots: Array<[number, number, number, number]> = [
-    [-8.8, 11.1, -21.5, -Math.PI / 2],
-    [8.8, 11.1, -21.5, Math.PI / 2],
-    [-1.4, 11.1, -22.2, 0],
-    [1.4, 11.1, -22.2, 0],
-    [-2.5, 7.52, -62.0, 0.2],
-    [2.5, 7.52, -62.0, -0.2],
-    [-9.2, 5.84, -8.5, -Math.PI / 2],
-    [-9.2, 5.84, -7.2, -Math.PI / 2],
-    [-9.2, 5.84, 21.5, -Math.PI / 2],
-    [-9.2, 5.84, 22.8, -Math.PI / 2],
-    [9.2, 5.84, -8.5, Math.PI / 2],
-    [9.2, 5.84, -7.2, Math.PI / 2],
-    [9.2, 5.84, 21.5, Math.PI / 2],
-    [9.2, 5.84, 22.8, Math.PI / 2],
-    [-8.6, 8.6, -4.0, -Math.PI / 2],
-    [-8.6, 8.6, 20.0, -Math.PI / 2],
-    [8.6, 8.6, -4.0, Math.PI / 2],
-    [8.6, 8.6, 20.0, Math.PI / 2],
+    [-8.8, 11.36, -21.5, -Math.PI / 2],
+    [8.8, 11.36, -21.5, Math.PI / 2],
+    [-1.4, 11.36, -22.2, 0],
+    [1.4, 11.36, -22.2, 0],
+    [-2.5, 7.75, -62.0, 0.2],
+    [2.5, 7.75, -62.0, -0.2],
+    [-9.2, 5.66, -8.5, -Math.PI / 2],
+    [-9.2, 5.66, -7.2, -Math.PI / 2],
+    [-9.2, 5.66, 21.5, -Math.PI / 2],
+    [-9.2, 5.66, 22.8, -Math.PI / 2],
+    [9.2, 5.66, -8.5, Math.PI / 2],
+    [9.2, 5.66, -7.2, Math.PI / 2],
+    [9.2, 5.66, 21.5, Math.PI / 2],
+    [9.2, 5.66, 22.8, Math.PI / 2],
+    [-8.6, 8.68, -4.0, -Math.PI / 2],
+    [-8.6, 8.68, 20.0, -Math.PI / 2],
+    [8.6, 8.68, -4.0, Math.PI / 2],
+    [8.6, 8.68, 20.0, Math.PI / 2],
   ];
   for (let i = 0; i < crewSpots.length; i++) {
     const [cx, cy, cz, ry] = crewSpots[i];
