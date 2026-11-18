@@ -4,11 +4,14 @@ export interface ProceduralTextureSet {
   mahoganyAlbedo: THREE.CanvasTexture;
   mahoganyRoughness: THREE.CanvasTexture;
   teakDeckAlbedo: THREE.CanvasTexture;
+  teakDeckNormal: THREE.DataTexture;
   steelHullAlbedo: THREE.CanvasTexture;
+  steelHullNormal: THREE.DataTexture;
   compassDial: THREE.CanvasTexture;
   telegraphDial: THREE.CanvasTexture;
+  clinometerDial: THREE.CanvasTexture;
   iceAlbedo: THREE.CanvasTexture;
-  iceBump: THREE.CanvasTexture;
+  iceNormal: THREE.DataTexture;
   sprayParticle: THREE.CanvasTexture;
   dispose: () => void;
 }
@@ -52,72 +55,164 @@ function configureDataTexture(
   return tex;
 }
 
+/**
+ * Converts a grayscale height canvas into a tangent-space normal DataTexture (linear space).
+ */
+function heightCanvasToNormalTexture(
+  canvas: HTMLCanvasElement,
+  strength: number,
+  maxAnisotropy: number,
+  repeatX = 1,
+  repeatY = 1,
+): THREE.DataTexture {
+  const w = canvas.width;
+  const h = canvas.height;
+  const ctx = canvas.getContext('2d')!;
+  const src = ctx.getImageData(0, 0, w, h).data;
+  const out = new Uint8Array(w * h * 4);
+
+  const sample = (x: number, y: number): number => {
+    const wx = ((x % w) + w) % w;
+    const wy = ((y % h) + h) % h;
+    return src[(wy * w + wx) * 4] / 255;
+  };
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const hL = sample(x - 1, y);
+      const hR = sample(x + 1, y);
+      const hU = sample(x, y - 1);
+      const hD = sample(x, y + 1);
+
+      const dx = (hL - hR) * strength;
+      const dy = (hU - hD) * strength;
+      const dz = 1.0;
+      const invLen = 1 / Math.hypot(dx, dy, dz);
+
+      const idx = (y * w + x) * 4;
+      out[idx] = Math.round((dx * invLen * 0.5 + 0.5) * 255);
+      out[idx + 1] = Math.round((dy * invLen * 0.5 + 0.5) * 255);
+      out[idx + 2] = Math.round((dz * invLen * 0.5 + 0.5) * 255);
+      out[idx + 3] = 255;
+    }
+  }
+
+  const tex = new THREE.DataTexture(out, w, h, THREE.RGBAFormat);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeatX, repeatY);
+  tex.anisotropy = maxAnisotropy;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export function createProceduralTextures(maxAnisotropy: number): ProceduralTextureSet {
-  // 1. Mahogany wood albedo & roughness
+  // 1. Rich Quarter-Sawn Mahogany Albedo & Gloss-Varnish Roughness
   const [mahCanvas, mahCtx] = makeCanvas(512, 512);
-  mahCtx.fillStyle = '#3b1c12';
+  mahCtx.fillStyle = '#3a190f';
   mahCtx.fillRect(0, 0, 512, 512);
   for (let y = 0; y < 512; y++) {
-    const wave = Math.sin(y * 0.08) * 10 + Math.sin(y * 0.31) * 4;
-    const tone = Math.floor(38 + Math.sin((y + wave) * 0.14) * 14);
-    mahCtx.fillStyle = `rgb(${tone + 26}, ${Math.max(10, tone - 8)}, ${Math.max(6, tone - 18)})`;
+    const ribbon = Math.sin(y * 0.045) * 14 + Math.sin(y * 0.19) * 5;
+    const tone = Math.floor(40 + Math.sin((y + ribbon) * 0.13) * 16);
+    mahCtx.fillStyle = `rgb(${tone + 34}, ${Math.max(10, tone - 6)}, ${Math.max(5, tone - 18)})`;
     mahCtx.fillRect(0, y, 512, 1);
   }
-  for (let i = 0; i < 400; i++) {
-    const x = (i * 73) % 512;
-    const y = (i * 139) % 512;
-    mahCtx.fillStyle = i % 2 === 0 ? 'rgba(20, 7, 4, 0.18)' : 'rgba(95, 48, 28, 0.14)';
-    mahCtx.fillRect(x, y, 42 + (i % 60), 2);
+  for (let i = 0; i < 650; i++) {
+    const x = (i * 89) % 512;
+    const y = (i * 149) % 512;
+    mahCtx.fillStyle = i % 3 === 0 ? 'rgba(18, 5, 2, 0.22)' : 'rgba(112, 54, 28, 0.15)';
+    mahCtx.fillRect(x, y, 36 + (i % 78), 1.5);
   }
   const mahoganyAlbedo = configureColorTexture(mahCanvas, maxAnisotropy, 2, 2);
 
   const [mahRCanvas, mahRCtx] = makeCanvas(256, 256);
-  mahRCtx.fillStyle = '#555555';
+  mahRCtx.fillStyle = '#484848';
   mahRCtx.fillRect(0, 0, 256, 256);
   for (let y = 0; y < 256; y += 2) {
-    const v = 70 + Math.floor(Math.sin(y * 0.25) * 20);
+    const v = 64 + Math.floor(Math.sin(y * 0.22) * 18);
     mahRCtx.fillStyle = `rgb(${v},${v},${v})`;
     mahRCtx.fillRect(0, y, 256, 2);
   }
   const mahoganyRoughness = configureDataTexture(mahRCanvas, maxAnisotropy, 2, 2);
 
-  // 2. Teak deck planking
+  // 2. Teak Deck Planking Albedo & Normal Map
   const [teakCanvas, teakCtx] = makeCanvas(512, 512);
+  const [teakHCanvas, teakHCtx] = makeCanvas(512, 512);
   teakCtx.fillStyle = '#8b6f4e';
   teakCtx.fillRect(0, 0, 512, 512);
+  teakHCtx.fillStyle = '#d0d0d0';
+  teakHCtx.fillRect(0, 0, 512, 512);
+
   const plankCount = 16;
   const plankW = 512 / plankCount;
   for (let p = 0; p < plankCount; p++) {
     const x = p * plankW;
-    const shade = ((p * 29) % 18) - 9;
-    teakCtx.fillStyle = `rgb(${132 + shade}, ${106 + shade}, ${76 + shade})`;
+    const shade = ((p * 31) % 20) - 10;
+    teakCtx.fillStyle = `rgb(${138 + shade}, ${112 + shade}, ${82 + shade})`;
     teakCtx.fillRect(x + 2, 0, plankW - 3, 512);
-    // Caulked seam
-    teakCtx.fillStyle = '#241d17';
-    teakCtx.fillRect(x, 0, 2, 512);
-    // Butt joints
+
+    // Subtle longitudinal grain lines
+    for (let g = 0; g < 6; g++) {
+      teakCtx.fillStyle = g % 2 === 0 ? 'rgba(65, 45, 25, 0.12)' : 'rgba(175, 145, 108, 0.1)';
+      teakCtx.fillRect(x + 4 + g * 4, 0, 1.5, 512);
+    }
+
+    // Caulked pitch seam
+    teakCtx.fillStyle = '#1f1914';
+    teakCtx.fillRect(x, 0, 2.2, 512);
+    teakHCtx.fillStyle = '#202020';
+    teakHCtx.fillRect(x, 0, 2.5, 512);
+
     const jointY = ((p * 173) % 380) + 60;
     teakCtx.fillRect(x, jointY, plankW, 2);
+    teakHCtx.fillRect(x, jointY, plankW, 2);
   }
-  const teakDeckAlbedo = configureColorTexture(teakCanvas, maxAnisotropy, 4, 12);
+  const teakDeckAlbedo = configureColorTexture(teakCanvas, maxAnisotropy, 4, 14);
+  const teakDeckNormal = heightCanvasToNormalTexture(teakHCanvas, 2.4, maxAnisotropy, 4, 14);
 
-  // 3. Riveted steel hull plates
+  // 3. Riveted Steel Hull Plates (Albedo + Normal Map)
   const [hullCanvas, hullCtx] = makeCanvas(512, 512);
-  hullCtx.fillStyle = '#141921';
+  const [hullHCanvas, hullHCtx] = makeCanvas(512, 512);
+  hullCtx.fillStyle = '#12171f';
   hullCtx.fillRect(0, 0, 512, 512);
+  hullHCtx.fillStyle = '#808080';
+  hullHCtx.fillRect(0, 0, 512, 512);
+
   for (let row = 0; row < 8; row++) {
     const y = row * 64;
-    hullCtx.fillStyle = row % 2 === 0 ? '#161c25' : '#12171f';
+    const offset = (row % 2) * 64;
+    hullCtx.fillStyle = row % 2 === 0 ? '#161c26' : '#11161e';
     hullCtx.fillRect(0, y, 512, 62);
-    hullCtx.fillStyle = '#0b0e14';
+    hullHCtx.fillStyle = row % 2 === 0 ? '#989898' : '#7a7a7a';
+    hullHCtx.fillRect(0, y, 512, 62);
+
+    // Plate lap seam
+    hullCtx.fillStyle = '#090c11';
     hullCtx.fillRect(0, y + 62, 512, 2);
-    for (let r = 8; r < 512; r += 24) {
-      hullCtx.fillStyle = '#262f3d';
+    hullHCtx.fillStyle = '#303030';
+    hullHCtx.fillRect(0, y + 62, 512, 2);
+
+    // Vertical plate joints
+    for (let vx = offset; vx < 512; vx += 128) {
+      hullCtx.fillStyle = '#0b0f15';
+      hullCtx.fillRect(vx, y, 2, 64);
+      hullHCtx.fillStyle = '#383838';
+      hullHCtx.fillRect(vx, y, 2, 64);
+    }
+
+    // Raised rivet rows
+    for (let r = 8; r < 512; r += 16) {
+      hullCtx.fillStyle = '#252e3c';
       hullCtx.fillRect(r, y + 4, 3, 3);
-      hullCtx.fillRect(r, y + 56, 3, 3);
+      hullCtx.fillRect(r, y + 55, 3, 3);
+
+      hullHCtx.fillStyle = '#d4d4d4';
+      hullHCtx.fillRect(r, y + 4, 3, 3);
+      hullHCtx.fillRect(r, y + 55, 3, 3);
     }
   }
-  const steelHullAlbedo = configureColorTexture(hullCanvas, maxAnisotropy, 6, 2);
+  const steelHullAlbedo = configureColorTexture(hullCanvas, maxAnisotropy, 10, 3);
+  const steelHullNormal = heightCanvasToNormalTexture(hullHCanvas, 2.8, maxAnisotropy, 10, 3);
 
   // 4. Compass Card Dial
   const [compCanvas, compCtx] = makeCanvas(512, 512);
@@ -125,17 +220,15 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   compCtx.fillRect(0, 0, 512, 512);
   compCtx.save();
   compCtx.translate(256, 256);
-  // Warm cream compass card
-  const cardGrad = compCtx.createRadialGradient(0, 0, 10, 0, 0, 235);
-  cardGrad.addColorStop(0, '#fff7dc');
-  cardGrad.addColorStop(0.75, '#ead8a7');
-  cardGrad.addColorStop(1, '#b89a60');
+  const cardGrad = compCtx.createRadialGradient(0, 0, 10, 0, 0, 236);
+  cardGrad.addColorStop(0, '#fff9e4');
+  cardGrad.addColorStop(0.75, '#ecd9a8');
+  cardGrad.addColorStop(1, '#b59352');
   compCtx.fillStyle = cardGrad;
   compCtx.beginPath();
   compCtx.arc(0, 0, 236, 0, Math.PI * 2);
   compCtx.fill();
 
-  // Degree ticks
   for (let deg = 0; deg < 360; deg += 5) {
     const rad = (deg * Math.PI) / 180;
     const isMajor = deg % 30 === 0;
@@ -149,8 +242,6 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     compCtx.lineTo(Math.cos(rad) * rOuter, Math.sin(rad) * rOuter);
     compCtx.stroke();
   }
-  // Cardinal labels
-  compCtx.fillStyle = '#1b1610';
   compCtx.font = 'bold 34px Georgia, serif';
   compCtx.textAlign = 'center';
   compCtx.textBaseline = 'middle';
@@ -164,7 +255,6 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     compCtx.fillStyle = col;
     compCtx.fillText(text, Math.cos(ang) * 155, Math.sin(ang) * 155);
   }
-  // Compass star
   compCtx.fillStyle = '#2d2418';
   for (let i = 0; i < 8; i++) {
     const a = (i * Math.PI) / 4;
@@ -187,7 +277,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   teleCtx.fillRect(0, 0, 512, 512);
   teleCtx.save();
   teleCtx.translate(256, 256);
-  teleCtx.fillStyle = '#f4ebd0';
+  teleCtx.fillStyle = '#f5ecd2';
   teleCtx.beginPath();
   teleCtx.arc(0, 0, 232, 0, Math.PI * 2);
   teleCtx.fill();
@@ -238,43 +328,69 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   telegraphDial.wrapS = THREE.ClampToEdgeWrapping;
   telegraphDial.wrapT = THREE.ClampToEdgeWrapping;
 
-  // 6. Glacial Ice Albedo & Bump
-  const [iceCanvas, iceCtx] = makeCanvas(256, 256);
-  iceCtx.fillStyle = '#cce3f4';
-  iceCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 600; i++) {
-    const x = (i * 53) % 256;
-    const y = (i * 97) % 256;
-    const w = 10 + (i % 34);
-    const h = 8 + ((i * 7) % 28);
+  // 6. Clinometer (Heel Angle Gauge) Dial
+  const [clinCanvas, clinCtx] = makeCanvas(256, 256);
+  clinCtx.fillStyle = '#f3ebd0';
+  clinCtx.fillRect(0, 0, 256, 256);
+  clinCtx.save();
+  clinCtx.translate(128, 128);
+  clinCtx.strokeStyle = '#292218';
+  clinCtx.lineWidth = 4;
+  clinCtx.beginPath();
+  clinCtx.arc(0, 0, 110, 0.2, Math.PI - 0.2);
+  clinCtx.stroke();
+  for (let deg = -40; deg <= 40; deg += 5) {
+    const rad = Math.PI / 2 + (deg * Math.PI) / 180;
+    const inner = deg % 10 === 0 ? 84 : 96;
+    clinCtx.lineWidth = deg % 10 === 0 ? 3 : 1.5;
+    clinCtx.beginPath();
+    clinCtx.moveTo(Math.cos(rad) * inner, Math.sin(rad) * inner);
+    clinCtx.lineTo(Math.cos(rad) * 110, Math.sin(rad) * 110);
+    clinCtx.stroke();
+  }
+  clinCtx.fillStyle = '#1e2430';
+  clinCtx.font = 'bold 16px Georgia, serif';
+  clinCtx.textAlign = 'center';
+  clinCtx.fillText('CLINOMETER', 0, -45);
+  clinCtx.restore();
+  const clinometerDial = configureColorTexture(clinCanvas, maxAnisotropy, 1, 1);
+  clinometerDial.wrapS = THREE.ClampToEdgeWrapping;
+  clinometerDial.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 7. Glacial Ice Albedo & Normal Map
+  const [iceCanvas, iceCtx] = makeCanvas(512, 512);
+  const [iceHCanvas, iceHCtx] = makeCanvas(512, 512);
+  iceCtx.fillStyle = '#cbe5f6';
+  iceCtx.fillRect(0, 0, 512, 512);
+  iceHCtx.fillStyle = '#808080';
+  iceHCtx.fillRect(0, 0, 512, 512);
+
+  for (let i = 0; i < 950; i++) {
+    const x = (i * 53) % 512;
+    const y = (i * 97) % 512;
+    const w = 14 + (i % 48);
+    const h = 10 + ((i * 7) % 36);
     iceCtx.fillStyle =
       i % 3 === 0
-        ? 'rgba(240, 249, 255, 0.25)'
+        ? 'rgba(242, 250, 255, 0.28)'
         : i % 3 === 1
-          ? 'rgba(120, 180, 222, 0.22)'
-          : 'rgba(65, 130, 175, 0.16)';
+          ? 'rgba(110, 178, 224, 0.22)'
+          : 'rgba(56, 126, 178, 0.16)';
     iceCtx.fillRect(x, y, w, h);
+
+    const hv = 85 + ((i * 23) % 135);
+    iceHCtx.fillStyle = `rgb(${hv},${hv},${hv})`;
+    iceHCtx.beginPath();
+    iceHCtx.moveTo(x, y);
+    iceHCtx.lineTo(x + w * 0.85, y + h * 0.25);
+    iceHCtx.lineTo(x + w * 0.35, y + h);
+    iceHCtx.closePath();
+    iceHCtx.fill();
   }
   const iceAlbedo = configureColorTexture(iceCanvas, maxAnisotropy, 2, 2);
+  const iceNormal = heightCanvasToNormalTexture(iceHCanvas, 2.2, maxAnisotropy, 2, 2);
 
-  const [iceBCanvas, iceBCtx] = makeCanvas(256, 256);
-  iceBCtx.fillStyle = '#808080';
-  iceBCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 300; i++) {
-    const x = (i * 67) % 256;
-    const y = (i * 113) % 256;
-    const v = 90 + ((i * 17) % 130);
-    iceBCtx.fillStyle = `rgb(${v},${v},${v})`;
-    iceBCtx.beginPath();
-    iceBCtx.moveTo(x, y);
-    iceBCtx.lineTo(x + 22, y + 6);
-    iceBCtx.lineTo(x + 8, y + 26);
-    iceBCtx.closePath();
-    iceBCtx.fill();
-  }
-  const iceBump = configureDataTexture(iceBCanvas, maxAnisotropy, 2, 2);
-
-  // 7. Soft radial spray particle
+  // 8. Soft radial spray particle
   const [sprayCanvas, sprayCtx] = makeCanvas(128, 128);
   const sGrad = sprayCtx.createRadialGradient(64, 64, 4, 64, 64, 60);
   sGrad.addColorStop(0, 'rgba(235, 246, 255, 0.95)');
@@ -290,21 +406,27 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     mahoganyAlbedo,
     mahoganyRoughness,
     teakDeckAlbedo,
+    teakDeckNormal,
     steelHullAlbedo,
+    steelHullNormal,
     compassDial,
     telegraphDial,
+    clinometerDial,
     iceAlbedo,
-    iceBump,
+    iceNormal,
     sprayParticle,
     dispose: () => {
       mahoganyAlbedo.dispose();
       mahoganyRoughness.dispose();
       teakDeckAlbedo.dispose();
+      teakDeckNormal.dispose();
       steelHullAlbedo.dispose();
+      steelHullNormal.dispose();
       compassDial.dispose();
       telegraphDial.dispose();
+      clinometerDial.dispose();
       iceAlbedo.dispose();
-      iceBump.dispose();
+      iceNormal.dispose();
       sprayParticle.dispose();
     },
   };

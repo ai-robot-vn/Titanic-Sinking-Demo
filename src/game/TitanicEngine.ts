@@ -24,10 +24,10 @@ const _vLookPos = new THREE.Vector3();
 const BEST_SCORE_KEY = 'titanic_bridge_best_score_v1';
 
 const HULL_CHECK_POINTS: Array<{ zLocal: number; radius: number }> = [
-  { zLocal: -64, radius: 3.4 },
-  { zLocal: -50, radius: 5.8 },
-  { zLocal: -32, radius: 8.0 },
-  { zLocal: -10, radius: 9.0 },
+  { zLocal: -67, radius: 3.4 },
+  { zLocal: -52, radius: 5.8 },
+  { zLocal: -34, radius: 8.2 },
+  { zLocal: -12, radius: 9.4 },
 ];
 
 export class TitanicEngine {
@@ -106,6 +106,7 @@ export class TitanicEngine {
   private readonly icebergs: IcebergEntity[] = [];
   private spawnAccumDist = 0;
   private sprayAccum = 0;
+  private smokeAccum = 0;
   private helmTickAccum = 0;
 
   // Input state
@@ -218,7 +219,7 @@ export class TitanicEngine {
     this.ship.hullMeshGroup.add(this.searchSpotLight);
 
     this.iceFactory = new IcebergFactory(this.textures);
-    this.particles = new ParticlePool(260);
+    this.particles = new ParticlePool(320);
     this.scene.add(this.particles.mesh);
 
     // Seed atmospheric icebergs for the live Title Screen backdrop
@@ -881,11 +882,12 @@ export class TitanicEngine {
     );
     this.ship.hullMeshGroup.rotation.z = this.rollAngle;
 
-    // Wheelhouse Helm Wheel & Rudder Indicator Needle
+    // Wheelhouse Helm Wheel, Rudder Needle & Overhead Clinometer Pendulum
     const targetWheel = -(this.rudderDeg / 35) * Math.PI * 1.15;
     this.wheelVisualAngle = THREE.MathUtils.damp(this.wheelVisualAngle, targetWheel, 10, dt);
     this.ship.helmWheel.rotation.z = this.wheelVisualAngle;
     this.ship.rudderNeedle.position.x = (this.rudderDeg / 35) * 0.14;
+    this.ship.clinometerNeedle.rotation.z = -this.rollAngle * 2.2;
 
     // Compass card rotates opposite to ship heading
     this.ship.compassCard.rotation.z = this.headingRad;
@@ -919,29 +921,52 @@ export class TitanicEngine {
       this.searchSpotLight.angle = Math.PI / 9.5;
     }
 
-    // Keep moon directional shadow frustum centered near forward ship deck
+    // Keep moon directional light aligned with the visible Arctic moon ahead-starboard
     const fwdX = Math.sin(this.headingRad);
     const fwdZ = -Math.cos(this.headingRad);
-    this.moonKeyLight.target.position.set(this.shipX + fwdX * 60, 0, this.shipZ + fwdZ * 60);
+    this.moonKeyLight.target.position.set(this.shipX + fwdX * 55, 0, this.shipZ + fwdZ * 55);
     this.moonKeyLight.position.set(
-      this.shipX + fwdX * 60 + 110,
-      145,
-      this.shipZ + fwdZ * 60 - 190,
+      this.shipX + fwdX * 55 + 95,
+      130,
+      this.shipZ + fwdZ * 55 - 235,
     );
   }
 
   private emitBowSpray(dt: number, fwdX: number, fwdZ: number): void {
     const absSpd = Math.abs(this.speedKnots);
-    if (absSpd < 4) return;
-    this.sprayAccum += dt * (absSpd * 0.75);
+    const hullY = this.ship.hullMeshGroup.position.y;
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
+
+    // Subtle coal smoke wisps from active forward funnels #1, #2, #3
+    if (this.powerLevel > 0.1 && hullY > -8) {
+      this.smokeAccum += dt * (2.5 + absSpd * 0.28);
+      while (this.smokeAccum >= 1) {
+        this.smokeAccum -= 1;
+        const funnelZ = [11.5, 25.5, 39.5][Math.floor(Math.random() * 3)];
+        this.particles.emit(
+          this.shipX - fwdX * funnelZ + (Math.random() - 0.5) * 1.4,
+          22.8 + hullY,
+          this.shipZ - fwdZ * funnelZ + (Math.random() - 0.5) * 1.4,
+          -fwdX * (4 + absSpd * 0.35) + (Math.random() - 0.5) * 1.5,
+          2.2 + Math.random() * 1.2,
+          -fwdZ * (4 + absSpd * 0.35) + (Math.random() - 0.5) * 1.5,
+          1.4 + Math.random() * 1.1,
+          2.1 + Math.random() * 0.8,
+          -0.8,
+          0x2e3744,
+        );
+      }
+    }
+
+    if (absSpd < 4) return;
+    this.sprayAccum += dt * (absSpd * 0.78);
 
     while (this.sprayAccum >= 1) {
       this.sprayAccum -= 1;
       const side = Math.random() < 0.5 ? -1 : 1;
-      const bowX = this.shipX + fwdX * 64 + rightX * side * 1.4;
-      const bowZ = this.shipZ + fwdZ * 64 + rightZ * side * 1.4;
+      const bowX = this.shipX + fwdX * 67 + rightX * side * 1.4;
+      const bowZ = this.shipZ + fwdZ * 67 + rightZ * side * 1.4;
       this.particles.emit(
         bowX,
         0.5,
@@ -1194,23 +1219,23 @@ export class TitanicEngine {
         .set(this.shipX, whY, this.shipZ)
         .addScaledVector(_vFwd, -1.28);
 
-      // Lifeboat overlook off the starboard bow/bridge
-      const lifeboatX = this.shipX + _vRight.x * (28 * this.listDirection) - _vFwd.x * 22;
-      const lifeboatZ = this.shipZ + _vRight.z * (28 * this.listDirection) - _vFwd.z * 22;
-      const lifeboatY = 12.5;
+      // Lifeboat overlook off the bow/bridge framing all 4 funnels & promenade lights
+      const lifeboatX = this.shipX + _vRight.x * (36 * this.listDirection) - _vFwd.x * 34;
+      const lifeboatZ = this.shipZ + _vRight.z * (36 * this.listDirection) - _vFwd.z * 34;
+      const lifeboatY = 14.5;
 
       _vCamPos.x = THREE.MathUtils.lerp(_vCamPos.x, lifeboatX, pullOut);
       _vCamPos.y = THREE.MathUtils.lerp(_vCamPos.y, lifeboatY, pullOut);
       _vCamPos.z = THREE.MathUtils.lerp(_vCamPos.z, lifeboatZ, pullOut);
 
-      // Target: inside looks down the sinking forecastle; outside frames the sinking bow & funnel
+      // Target: inside looks down the sinking forecastle; outside frames the full Titanic
       const whTargetX = this.shipX + _vFwd.x * 50;
       const whTargetY = Math.max(0.2, 7.5 + hullY - 12 * Math.abs(this.sinkPitch));
       const whTargetZ = this.shipZ + _vFwd.z * 50;
 
-      const outTargetX = this.shipX + _vFwd.x * 20;
-      const outTargetY = Math.max(-2.5, 4.5 + hullY * 0.65);
-      const outTargetZ = this.shipZ + _vFwd.z * 20;
+      const outTargetX = this.shipX + _vFwd.x * 8;
+      const outTargetY = Math.max(-2.5, 5.5 + hullY * 0.65);
+      const outTargetZ = this.shipZ + _vFwd.z * 8;
 
       _vCamTarget.set(
         THREE.MathUtils.lerp(whTargetX, outTargetX, pullOut),
@@ -1236,16 +1261,16 @@ export class TitanicEngine {
           ),
         );
     } else {
-      // Starboard Bridge Wing / High Overlook showing Titanic's forward sweep & funnel
+      // Starboard Bridge Wing / Quarter Overlook showing bow, lit portholes, lifeboats & funnels
       const hullY = this.ship.hullMeshGroup.position.y;
       _vCamPos
-        .set(this.shipX, 15.8 + hullY, this.shipZ)
-        .addScaledVector(_vFwd, -6.5)
-        .addScaledVector(_vRight, 11.2);
+        .set(this.shipX, 16.5 + hullY, this.shipZ)
+        .addScaledVector(_vFwd, -10.5)
+        .addScaledVector(_vRight, 13.8);
 
       const lookYaw = this.headingRad - this.lookYawOffset * 0.8;
       _vCamTarget
-        .set(this.shipX, 8.2 + hullY, this.shipZ)
+        .set(this.shipX, 8.6 + hullY, this.shipZ)
         .add(
           _vLookPos.set(
             Math.sin(lookYaw) * 65,
