@@ -42,3 +42,10 @@ export default defineConfig(() => {
     },
   };
 });
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react' // hoặc plugin tương ứng của bạn
+
+export default defineConfig({
+  base: '/Titanic-Sinking-Demo/',
+  plugins: [react()],
+})
