@@ -19,8 +19,8 @@ import {
   AftermathFocusTarget,
   CameraMode,
   CarpathiaStage,
+  DEFAULT_TELEGRAPH_INDEX,
   GamePhase,
-  IcebergVariant,
   TARGET_VOYAGE_NM,
   TELEGRAPH_NOTCHES,
   TelemetrySnapshot,
@@ -70,7 +70,7 @@ interface NavalProjectile {
   active: boolean;
   kind: 'torpedo' | 'subShell' | 'warshipShell';
   ownerSide: 'submarine' | 'warship';
-  targetKind: 'titanic' | 'carpathia' | 'submarine';
+  targetKind: 'titanic' | 'carpathia' | 'submarine' | 'warship1' | 'warship2';
   targetSubId: number;
   x: number;
   y: number;
@@ -160,8 +160,8 @@ export class TitanicEngine {
   private wheelVisualAngle = 0;
   private rollAngle = 0;
 
-  private telegraphIndex = 4; // Start at FULL AHEAD (20 kts)
-  private speedKnots = 16;
+  private telegraphIndex = DEFAULT_TELEGRAPH_INDEX;
+  private speedKnots = TELEGRAPH_NOTCHES[DEFAULT_TELEGRAPH_INDEX].targetKnots;
   private distanceNm = 0;
   private hullIntegrity = 100;
   private floodingPct = 0;
@@ -466,13 +466,13 @@ export class TitanicEngine {
         diveY: -12,
         damagePitch: 0,
         damageRoll: 0,
-        hp: 3,
-        maxHp: 3,
+        hp: 6,
+        maxHp: 6,
         gunYaw: 0,
         gunFireFlash: 0,
         hitFireIntensity: 0,
-        torpedoCooldown: 3.5 + i * 2.5,
-        gunCooldown: 2.2 + i * 1.8,
+        torpedoCooldown: 1.8 + i * 1.1,
+        gunCooldown: 1.2 + i * 0.9,
         sideSign: i === 0 ? -1 : 1,
         sinkElapsed: 0,
         wakeAccum: 0,
@@ -540,6 +540,8 @@ export class TitanicEngine {
       this.warship2Z,
       this.warship2HeadingRad,
       this.warship2SpeedKnots,
+      1.0,
+      1.0,
     );
     this.updateTitleCamera();
     this.oceanAndSky.updateCameraView(this.camera.position, 0);
@@ -556,25 +558,20 @@ export class TitanicEngine {
   }
 
   private seedInitialIcebergs(): void {
+    if (this.initialIceSeeded || this.icebergs.length > 0) return;
     this.clearIcebergs();
     const fwdX = Math.sin(this.headingRad);
     const fwdZ = -Math.cos(this.headingRad);
     const rightX = Math.cos(this.headingRad);
     const rightZ = Math.sin(this.headingRad);
-    const initialSet: Array<{ variant: IcebergVariant; lateral: number; ahead: number; scale: number }> = [
-      { variant: 'pinnacle', lateral: -46, ahead: 195, scale: 1.05 },
-      { variant: 'tabular', lateral: 52, ahead: 255, scale: 1.15 },
-      { variant: 'growler', lateral: -16, ahead: 300, scale: 0.95 },
-      { variant: 'pinnacle', lateral: 64, ahead: 370, scale: 1.2 },
-      { variant: 'tabular', lateral: -62, ahead: 410, scale: 1.0 },
-    ];
-    for (const item of initialSet) {
-      const sx = this.shipX + fwdX * item.ahead + rightX * item.lateral;
-      const sz = this.shipZ + fwdZ * item.ahead + rightZ * item.lateral;
-      const berg = this.iceFactory.spawnIceberg(item.variant, sx, sz, item.scale);
-      this.icebergs.push(berg);
-      this.scene.add(berg.group);
-    }
+    // Spawn exactly one dramatic iceberg along the open-sea approach
+    const lateral = 14;
+    const ahead = 205;
+    const sx = this.shipX + fwdX * ahead + rightX * lateral;
+    const sz = this.shipZ + fwdZ * ahead + rightZ * lateral;
+    const berg = this.iceFactory.spawnIceberg('pinnacle', sx, sz, 1.24);
+    this.icebergs.push(berg);
+    this.scene.add(berg.group);
     this.initialIceSeeded = true;
   }
 
@@ -778,11 +775,12 @@ export class TitanicEngine {
     this.resetShipRigPose();
     this.harbor.resetEscorts();
 
+    this.telegraphIndex = DEFAULT_TELEGRAPH_INDEX;
+    this.speedKnots = TELEGRAPH_NOTCHES[DEFAULT_TELEGRAPH_INDEX].targetKnots;
+
     if (startInNightIceAlley) {
       this.shipX = 0;
-      this.shipZ = -2100;
-      this.telegraphIndex = 4; // FULL AHEAD
-      this.speedKnots = 18;
+      this.shipZ = -850;
       this.harbor.root.visible = false;
       this.applyAtmosphere(1.0);
       this.ship.setPowerLevel(1);
@@ -793,8 +791,6 @@ export class TitanicEngine {
       // Dock-Start Direct Control right at Southampton Berth 44
       this.shipX = 0;
       this.shipZ = 0;
-      this.telegraphIndex = 1; // ALL STOP — player sets speed & steers from dock
-      this.speedKnots = 0;
       this.harbor.root.visible = true;
       this.applyAtmosphere(0);
       this.resetWarshipPose(false);
@@ -809,7 +805,7 @@ export class TitanicEngine {
         0,
         false,
       );
-      this.eventText = 'BERTH 44 — PRESS W FOR ENGINE ORDER · ← / → RUDDER';
+      this.eventText = 'BERTH 44 DEPARTURE — W / X TELEGRAPH · ← / → HELM · [A] AUTOPILOT';
       this.sound.playSteamWhistle();
     }
 
@@ -962,7 +958,8 @@ export class TitanicEngine {
     this.shipZ = 0;
     this.headingRad = 0;
     this.rudderDeg = 0;
-    this.speedKnots = 0;
+    this.telegraphIndex = DEFAULT_TELEGRAPH_INDEX;
+    this.speedKnots = TELEGRAPH_NOTCHES[DEFAULT_TELEGRAPH_INDEX].targetKnots;
     this.hullIntegrity = 100;
     this.floodingPct = 0;
     this.waterIngressRate = 0;
@@ -1346,6 +1343,8 @@ export class TitanicEngine {
         this.warship2Z,
         this.warship2HeadingRad,
         this.warship2SpeedKnots,
+        1.0,
+        1.0,
       );
       this.particles.update(dt);
       this.updateTitleCamera();
@@ -1400,6 +1399,8 @@ export class TitanicEngine {
         this.warship2Z,
         this.warship2HeadingRad,
         this.warship2State.status === 'intact' ? this.warship2SpeedKnots : 0,
+        this.phase === 'victory' ? 1.0 : 0.0,
+        this.phase === 'victory' ? 1.0 : 0.0,
       );
       this.particles.update(dt);
       this.updateCamera(dt);
@@ -1454,12 +1455,12 @@ export class TitanicEngine {
     // I / J / K / L Smooth Interior & Deck Walking
     this.stepInteriorWalk(dt);
 
-    // Telegraph speed interpolation (massive liner inertia)
+    // Telegraph speed interpolation (responsive liner momentum without fixed speed cap)
     const targetKnots = TELEGRAPH_NOTCHES[this.telegraphIndex].targetKnots;
-    const accelRate = targetKnots < this.speedKnots ? 0.75 : 0.48;
+    const accelRate = targetKnots < this.speedKnots ? 0.75 : 0.62;
     this.speedKnots = THREE.MathUtils.damp(this.speedKnots, targetKnots, accelRate, dt);
 
-    // Rudder authority scales with speed (with a low-speed tug/thruster nudge so dock maneuvering works cleanly)
+    // Rudder authority scales with speed (with low-speed tug/thruster nudge so dock maneuvering works cleanly)
     const speedAuthority = 0.36 + 0.64 * Math.min(1, Math.abs(this.speedKnots) / 20);
     const reverseSign = this.speedKnots < -1 ? -0.65 : 1;
     const targetYawRate = (this.rudderDeg / 35) * 0.36 * speedAuthority * reverseSign;
@@ -1473,17 +1474,17 @@ export class TitanicEngine {
     this.shipX += fwdX * worldSpeed * dt;
     this.shipZ += fwdZ * worldSpeed * dt;
 
-    // Progress Nautical Miles & Score
+    // Progress Nautical Miles & Score rapidly toward destination
     if (this.speedKnots > 0.2) {
       const distStep = worldSpeed * dt;
-      const nmDelta = distStep / 340;
+      const nmDelta = distStep / 400;
       this.distanceNm += nmDelta;
       this.score += nmDelta * (120 + this.speedKnots * 6);
     }
 
-    // Smoothly transition atmosphere from Southampton Daylight (shipZ >= -540) to April 14 Night (-1450+)
-    const seaMix = THREE.MathUtils.smoothstep(-this.shipZ, 540, 1450);
-    this.harbor.root.visible = Math.hypot(this.shipX, this.shipZ) < 1750;
+    // Swiftly transition atmosphere from Southampton Daylight (shipZ >= -260) to April 14 Night (-680+)
+    const seaMix = THREE.MathUtils.smoothstep(-this.shipZ, 260, 680);
+    this.harbor.root.visible = Math.hypot(this.shipX, this.shipZ) < 1350;
     if (this.harbor.root.visible) {
       this.harbor.update(
         this.simTime,
@@ -1510,10 +1511,10 @@ export class TitanicEngine {
       this.searchlightCooldown = Math.max(0, this.searchlightCooldown - dt);
     }
 
-    // Progressive water ingress when compartments are breached
+    // Slow, resilient progressive water ingress only after serious compartment breaches
     if (this.hullIntegrity <= 78) {
       const damageSeverity = (80 - this.hullIntegrity) / 80; // 0.025 -> 1.0
-      this.waterIngressRate = 1.0 + damageSeverity * damageSeverity * 5.6;
+      this.waterIngressRate = 0.28 + damageSeverity * damageSeverity * 1.35;
       this.floodingPct = Math.min(100, this.floodingPct + this.waterIngressRate * dt);
     } else {
       this.waterIngressRate = 0;
@@ -1554,13 +1555,15 @@ export class TitanicEngine {
       this.warship2Z,
       this.warship2HeadingRad,
       this.warship2State.status === 'intact' ? this.warship2SpeedKnots : 0,
+      1.0,
+      1.0,
     );
 
-    // Seed Ice Alley once approaching open night water & spawn icebergs dynamically
-    if (seaMix > 0.72) {
+    // Seed the single iceberg once approaching open night water & update its drift
+    if (seaMix > 0.62) {
       if (!this.initialIceSeeded && this.icebergs.length === 0) {
         this.seedInitialIcebergs();
-        this.eventText = 'ENTERING ICE ALLEY — KEEP SHARP LOOKOUT';
+        this.eventText = 'SINGLE ICEBERG SIGHTED DEAD AHEAD — KEEP SHARP LOOKOUT';
         this.eventTimer = 3.2;
       }
       this.manageIcebergField(dt, worldSpeed, fwdX, fwdZ);
@@ -1784,17 +1787,17 @@ export class TitanicEngine {
 
     this.autopilotTargetRudder = bestDeg;
 
-    // Intelligent Wheelhouse Telegraph Management (slows for tight turns, cruises at Full Ahead when clear)
+    // Intelligent Wheelhouse Telegraph Management (slows for tight turns, cruises at Flank/Full when clear)
     if (this.autopilotSpeedCooldown > 0) {
       this.autopilotSpeedCooldown = Math.max(0, this.autopilotSpeedCooldown - dt);
     } else {
-      let desiredNotch = this.nightMix < 0.35 ? 3 : 4; // HALF AHEAD in channel, FULL AHEAD at sea
+      let desiredNotch = this.nightMix < 0.35 ? 4 : 5;
       if (bestMinClearance < 8) {
-        desiredNotch = 1; // ALL STOP to prevent impact if crowded
+        desiredNotch = 1;
       } else if (bestMinClearance < 18) {
-        desiredNotch = 2; // SLOW AHEAD for maximum turning tightness
+        desiredNotch = 2;
       } else if (bestMinClearance < 28) {
-        desiredNotch = 3; // HALF AHEAD
+        desiredNotch = 3;
       }
       if (this.telegraphIndex <= 1 && bestMinClearance >= 14) {
         desiredNotch = Math.max(desiredNotch, 3);
@@ -1900,11 +1903,19 @@ export class TitanicEngine {
 
   private syncUnderwaterCameraEffects(nightMix: number, dt: number): void {
     const spec = VESSEL_SPOTS[this.focusSpotIndex];
+    const compartmentDry =
+      this.phase === 'title' ||
+      this.phase === 'playing' ||
+      this.phase === 'victory' ||
+      (this.phase === 'sinking' && spec.id === 'engine' && this.sinkProgress < 0.58);
     const insideDryCompartment =
-      this.phase !== 'sinking' &&
-      (spec.id === 'dining' || spec.id === 'engine' || spec.id === 'staircase') &&
-      this.orbitDistance < 12 &&
-      this.floodingPct < 80;
+      compartmentDry &&
+      (spec.id === 'dining' ||
+        spec.id === 'engine' ||
+        spec.id === 'staircase' ||
+        spec.id === 'marconi' ||
+        spec.id === 'lounge') &&
+      this.orbitDistance < 24;
 
     const waveY = sampleOceanWaveHeight(this.camera.position.x, this.camera.position.z, this.simTime);
     const depthBelowWave = insideDryCompartment ? -1.0 : waveY - this.camera.position.y;
@@ -1979,12 +1990,16 @@ export class TitanicEngine {
   }
 
   private stepSinkingSequence(dt: number): void {
-    // ~24-second multi-stage dramatic sinking: Bow plunge -> Midships fracture -> Bow dives -> Stern vertical plunge
-    this.sinkProgress = Math.min(1, this.sinkProgress + dt / 24.0);
+    // Sinking speed visibly decelerates once hull reaches 0% integrity and becomes submerged
+    const prevP = this.sinkProgress;
+    const isSubmerged = this.hullIntegrity <= 0 && prevP >= 0.38;
+    const isFullySubmerged = this.hullIntegrity <= 0 && prevP >= 0.72;
+    const sinkDuration = isFullySubmerged ? 64.0 : isSubmerged ? 40.0 : 18.0;
+    this.sinkProgress = Math.min(1, prevP + dt / sinkDuration);
     const p = this.sinkProgress;
 
-    // Engines stop & forward momentum bleeds off as bow buries into sea
-    this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, 0.7, dt);
+    // Forward momentum bleeds off smoothly as vessel submerges
+    this.speedKnots = THREE.MathUtils.damp(this.speedKnots, 0, isSubmerged ? 2.4 : 1.0, dt);
     const fwdX = Math.sin(this.headingRad);
     const fwdZ = -Math.cos(this.headingRad);
     const rightX = Math.cos(this.headingRad);
@@ -2164,6 +2179,8 @@ export class TitanicEngine {
       this.warship2Z,
       this.warship2HeadingRad,
       this.warship2State.status === 'intact' ? this.warship2SpeedKnots : 0,
+      p < 0.16 ? 1.0 : 0.0,
+      p < 0.58 ? 1.0 : 0.0,
     );
     this.particles.update(dt);
     this.shakeIntensity = Math.max(0.06 * (1 - p), this.shakeIntensity - dt * 1.4);
@@ -2493,6 +2510,8 @@ export class TitanicEngine {
       this.warship2Z,
       this.warship2HeadingRad,
       this.warship2State.status === 'intact' ? this.warship2SpeedKnots : 0,
+      0.0,
+      0.0,
     );
     this.particles.update(dt);
     this.updateCamera(dt);
@@ -2649,12 +2668,13 @@ export class TitanicEngine {
 
     for (let i = 0; i < this.submarines.length; i++) {
       const sub = this.submarines[i];
-      const aheadDist = targetVessel === 'titanic' ? 215 + i * 24 : 110 - i * 45;
-      const latDist = sub.sideSign * (162 + i * 24);
+      const aheadDist =
+        targetVessel === 'titanic' ? (i === 0 ? -55 : 145) : i === 0 ? 65 : 95;
+      const latDist = sub.sideSign * (158 + i * 16);
       sub.x = refX + fwdX * aheadDist + rightX * latDist;
       sub.z = refZ + fwdZ * aheadDist + rightZ * latDist;
       sub.headingRad = Math.atan2(refX - sub.x, -(refZ - sub.z));
-      sub.speedKnots = targetVessel === 'titanic' ? 14 : 9;
+      sub.speedKnots = targetVessel === 'titanic' ? 13 : 9;
       sub.diveY = -5.5;
       sub.damagePitch = 0;
       sub.damageRoll = 0;
@@ -2662,8 +2682,8 @@ export class TitanicEngine {
       sub.gunYaw = 0;
       sub.gunFireFlash = 0;
       sub.hitFireIntensity = 0;
-      sub.torpedoCooldown = 2.8 + i * 2.2;
-      sub.gunCooldown = 1.8 + i * 1.5;
+      sub.torpedoCooldown = 1.6 + i * 1.1;
+      sub.gunCooldown = 1.1 + i * 0.9;
       sub.sinkElapsed = 0;
       sub.wakeAccum = 0;
       sub.targetVessel = targetVessel;
@@ -2722,9 +2742,9 @@ export class TitanicEngine {
     primaryTarget: 'titanic' | 'carpathia',
   ): void {
     // 1. Trigger U-boat attacks during open Atlantic night watch (Titanic) and Rescue aftermath (Carpathia)
-    if (primaryTarget === 'titanic' && this.phase === 'playing' && seaMix > 0.68 && !this.submarineCruiseTriggered) {
+    if (primaryTarget === 'titanic' && this.phase === 'playing' && seaMix > 0.56 && !this.submarineCruiseTriggered) {
       this.cruiseSubTimer += dt;
-      if (this.cruiseSubTimer >= 3.8) {
+      if (this.cruiseSubTimer >= 1.2) {
         this.submarineCruiseTriggered = true;
         this.deploySubmarines('titanic');
       }
@@ -2795,24 +2815,71 @@ export class TitanicEngine {
         sub.x += Math.sin(sub.headingRad) * moveSpd * dt;
         sub.z += -Math.cos(sub.headingRad) * moveSpd * dt;
 
-        // Train 8.8cm deck gun toward Titanic or Carpathia
+        // Select firing target: U-14 (sub 0) prioritizes engaging escort warships; U-17 harasses Titanic/Carpathia & warships
+        let fireTargetKind: NavalProjectile['targetKind'] = primaryTarget;
+        let fireX = tgtX;
+        let fireZ = tgtZ;
+        let fireVx = primaryTarget === 'carpathia' ? 0 : Math.sin(this.headingRad) * this.speedKnots * 2.15;
+        let fireVz = primaryTarget === 'carpathia' ? 0 : -Math.cos(this.headingRad) * this.speedKnots * 2.15;
+
+        const w1Intact = this.warship1State.status === 'intact';
+        const w2Intact = this.warship2State.status === 'intact';
+        const dW1 = w1Intact ? Math.hypot(this.warshipX - sub.x, this.warshipZ - sub.z) : 9999;
+        const dW2 = w2Intact ? Math.hypot(this.warship2X - sub.x, this.warship2Z - sub.z) : 9999;
+        const engageWarship1 =
+          w1Intact &&
+          dW1 < 680 &&
+          (i === 0 || Math.floor(this.simTime * 0.35) % 2 === 0 || primaryTarget === 'carpathia');
+        const engageWarship2 = !engageWarship1 && w2Intact && dW2 < 680 && (!w1Intact || i === 1);
+
+        if (engageWarship1) {
+          fireTargetKind = 'warship1';
+          fireX = this.warshipX;
+          fireZ = this.warshipZ;
+          fireVx = Math.sin(this.warshipHeadingRad) * this.warshipSpeedKnots * 2.15;
+          fireVz = -Math.cos(this.warshipHeadingRad) * this.warshipSpeedKnots * 2.15;
+        } else if (engageWarship2 && (i === 0 || Math.floor(this.simTime * 0.25) % 2 === 1)) {
+          fireTargetKind = 'warship2';
+          fireX = this.warship2X;
+          fireZ = this.warship2Z;
+          fireVx = Math.sin(this.warship2HeadingRad) * this.warship2SpeedKnots * 2.15;
+          fireVz = -Math.cos(this.warship2HeadingRad) * this.warship2SpeedKnots * 2.15;
+        }
+
+        const dxFire = fireX - sub.x;
+        const dzFire = fireZ - sub.z;
+        const distFire = Math.hypot(dxFire, dzFire) || 1;
+
+        // Train 8.8cm deck gun toward active target
         const sFwdX = Math.sin(sub.headingRad);
         const sFwdZ = -Math.cos(sub.headingRad);
         const sRightX = Math.cos(sub.headingRad);
         const sRightZ = Math.sin(sub.headingRad);
-        const localTX = dxT * sRightX + dzT * sRightZ;
-        const localTZ = -(dxT * sFwdX + dzT * sFwdZ);
+        const localTX = dxFire * sRightX + dzFire * sRightZ;
+        const localTZ = -(dxFire * sFwdX + dzFire * sFwdZ);
         sub.gunYaw = Math.atan2(-localTX, -localTZ);
 
         // Only fire once conning tower & deck gun are above surface
         if (sub.diveY > -0.7 && (primaryTarget === 'carpathia' || this.phase === 'playing')) {
           sub.torpedoCooldown -= dt;
           if (sub.torpedoCooldown <= 0) {
-            sub.torpedoCooldown = 6.5 + Math.random() * 2.5;
-            const tSpd = 26;
-            const aimSpread = (Math.random() - 0.5) * 0.14;
-            const dirX = dxT / distT;
-            const dirZ = dzT / distT;
+            sub.torpedoCooldown =
+              fireTargetKind === 'warship1' || fireTargetKind === 'warship2'
+                ? 3.8 + Math.random() * 1.1
+                : 4.8 + Math.random() * 1.5;
+            const tSpd = 36;
+            const leadT = Math.min(10.0, distFire / tSpd);
+            const aimX = fireX + fireVx * leadT;
+            const aimZ = fireZ + fireVz * leadT;
+            const tDx = aimX - (sub.x + sFwdX * 30);
+            const tDz = aimZ - (sub.z + sFwdZ * 30);
+            const tDist = Math.hypot(tDx, tDz) || 1;
+            const aimSpread =
+              fireTargetKind === 'warship1' || fireTargetKind === 'warship2'
+                ? (Math.random() - 0.5) * 0.04
+                : (Math.random() - 0.5) * 0.12;
+            const dirX = tDx / tDist;
+            const dirZ = tDz / tDist;
             const cosA = Math.cos(aimSpread);
             const sinA = Math.sin(aimSpread);
             const launchVx = (dirX * cosA - dirZ * sinA) * tSpd;
@@ -2820,7 +2887,7 @@ export class TitanicEngine {
             this.spawnProjectile(
               'torpedo',
               'submarine',
-              primaryTarget,
+              fireTargetKind,
               sub.id,
               sub.x + sFwdX * 30,
               0.2,
@@ -2828,25 +2895,28 @@ export class TitanicEngine {
               launchVx,
               0,
               launchVz,
-              9.0,
+              16.0,
             );
             this.sound.playTorpedoLaunch();
           }
 
           sub.gunCooldown -= dt;
           if (sub.gunCooldown <= 0) {
-            sub.gunCooldown = 4.2 + Math.random() * 1.8;
+            sub.gunCooldown = 3.1 + Math.random() * 1.1;
             sub.gunFireFlash = 1.0;
-            const flightT = Math.min(2.6, Math.max(1.2, distT / 72));
+            const flightT = THREE.MathUtils.clamp(distFire / 76, 1.0, 2.6);
             const muzX = sub.x + sFwdX * 16.5;
             const muzZ = sub.z + sFwdZ * 16.5;
-            const vx = (tgtX + (Math.random() - 0.5) * 14 - muzX) / flightT;
-            const vz = (tgtZ + (Math.random() - 0.5) * 14 - muzZ) / flightT;
-            const vy = (4.0 - 2.8) / flightT + 0.5 * 9.8 * flightT;
+            const aimX = fireX + fireVx * flightT;
+            const aimZ = fireZ + fireVz * flightT;
+            const spread = fireTargetKind === 'warship1' || fireTargetKind === 'warship2' ? 6 : 12;
+            const vx = (aimX + (Math.random() - 0.5) * spread - muzX) / flightT;
+            const vz = (aimZ + (Math.random() - 0.5) * spread - muzZ) / flightT;
+            const vy = (4.2 - 2.8) / flightT + 0.5 * 9.8 * flightT;
             this.spawnProjectile(
               'subShell',
               'submarine',
-              primaryTarget,
+              fireTargetKind,
               sub.id,
               muzX,
               2.8,
@@ -2921,7 +2991,7 @@ export class TitanicEngine {
       );
     }
 
-    // 3. Assign Intact Royal Navy Escort Warships to counter-attack active hunting submarines
+    // 3. Assign Intact Royal Navy Escort Warships to counter-attack active surfaced submarines
     const sub0 = this.submarines[0];
     const sub1 = this.submarines[1];
     const targetForW1 = sub0.state === 'hunting' ? sub0 : sub1.state === 'hunting' ? sub1 : null;
@@ -2931,7 +3001,7 @@ export class TitanicEngine {
     this.warship2FireFlash = Math.max(0, this.warship2FireFlash - dt * 5.0);
 
     this.warship1Engaged =
-      this.warship1State.status === 'intact' && Boolean(targetForW1 && targetForW1.diveY > -1.4);
+      this.warship1State.status === 'intact' && Boolean(targetForW1 && targetForW1.diveY > -0.7);
     if (this.warship1Engaged && targetForW1) {
       const wFwdX = Math.sin(this.warshipHeadingRad);
       const wFwdZ = -Math.cos(this.warshipHeadingRad);
@@ -2944,14 +3014,20 @@ export class TitanicEngine {
 
       this.warship1FireCooldown -= dt;
       if (this.warship1FireCooldown <= 0) {
-        this.warship1FireCooldown = 2.6 + Math.random() * 0.9;
+        this.warship1FireCooldown = 3.2 + Math.random() * 1.1;
         this.warship1FireFlash = 1.0;
         const dist = Math.hypot(dx, dz) || 1;
-        const flightT = THREE.MathUtils.clamp(dist / 78, 0.9, 2.2);
+        const flightT = THREE.MathUtils.clamp(dist / 82, 0.9, 2.3);
         const muzX = this.warshipX + wFwdX * 42;
         const muzZ = this.warshipZ + wFwdZ * 42;
-        const vx = (targetForW1.x - muzX) / flightT;
-        const vz = (targetForW1.z - muzZ) / flightT;
+        const subSpd1 = targetForW1.speedKnots * 1.95;
+        const subVx1 = Math.sin(targetForW1.headingRad) * subSpd1;
+        const subVz1 = -Math.cos(targetForW1.headingRad) * subSpd1;
+        const err = Math.random() < 0.42 ? 16 : 3.5;
+        const aimX = targetForW1.x + subVx1 * (flightT * 0.85) + (Math.random() - 0.5) * err;
+        const aimZ = targetForW1.z + subVz1 * (flightT * 0.85) + (Math.random() - 0.5) * err;
+        const vx = (aimX - muzX) / flightT;
+        const vz = (aimZ - muzZ) / flightT;
         const vy = (1.6 - 7.8) / flightT + 0.5 * 9.8 * flightT;
         this.spawnProjectile(
           'warshipShell',
@@ -2971,7 +3047,7 @@ export class TitanicEngine {
     }
 
     this.warship2Engaged =
-      this.warship2State.status === 'intact' && Boolean(targetForW2 && targetForW2.diveY > -1.4);
+      this.warship2State.status === 'intact' && Boolean(targetForW2 && targetForW2.diveY > -0.7);
     if (this.warship2Engaged && targetForW2) {
       const w2FwdX = Math.sin(this.warship2HeadingRad);
       const w2FwdZ = -Math.cos(this.warship2HeadingRad);
@@ -2984,14 +3060,20 @@ export class TitanicEngine {
 
       this.warship2FireCooldown -= dt;
       if (this.warship2FireCooldown <= 0) {
-        this.warship2FireCooldown = 2.5 + Math.random() * 0.9;
+        this.warship2FireCooldown = 3.1 + Math.random() * 1.1;
         this.warship2FireFlash = 1.0;
         const dist = Math.hypot(dx, dz) || 1;
-        const flightT = THREE.MathUtils.clamp(dist / 78, 0.9, 2.2);
+        const flightT = THREE.MathUtils.clamp(dist / 82, 0.9, 2.3);
         const muzX = this.warship2X + w2FwdX * 42;
         const muzZ = this.warship2Z + w2FwdZ * 42;
-        const vx = (targetForW2.x - muzX) / flightT;
-        const vz = (targetForW2.z - muzZ) / flightT;
+        const subSpd2 = targetForW2.speedKnots * 1.95;
+        const subVx2 = Math.sin(targetForW2.headingRad) * subSpd2;
+        const subVz2 = -Math.cos(targetForW2.headingRad) * subSpd2;
+        const err = Math.random() < 0.42 ? 16 : 3.5;
+        const aimX = targetForW2.x + subVx2 * (flightT * 0.85) + (Math.random() - 0.5) * err;
+        const aimZ = targetForW2.z + subVz2 * (flightT * 0.85) + (Math.random() - 0.5) * err;
+        const vx = (aimX - muzX) / flightT;
+        const vz = (aimZ - muzZ) / flightT;
         const vy = (1.6 - 7.8) / flightT + 0.5 * 9.8 * flightT;
         this.spawnProjectile(
           'warshipShell',
@@ -3052,7 +3134,7 @@ export class TitanicEngine {
           const dxS = p.x - this.shipX;
           const dzS = p.z - this.shipZ;
           const distS = Math.hypot(dxS, dzS);
-          if (distS < 45) {
+          if (distS < 135) {
             const tFwdX = Math.sin(this.headingRad);
             const tFwdZ = -Math.cos(this.headingRad);
             const tRightX = Math.cos(this.headingRad);
@@ -3080,34 +3162,45 @@ export class TitanicEngine {
         } else if (p.targetKind === 'carpathia' && this.carpathia.root.visible && this.carpathiaState.status === 'intact') {
           const cx = this.carpathia.root.position.x;
           const cz = this.carpathia.root.position.z;
-          if (Math.hypot(p.x - cx, p.z - cz) < 28 && p.y < 14) {
-            impacted = true;
-            const isTorp = p.kind === 'torpedo';
-            for (let k = 0; k < 18; k++) {
-              this.particles.emit(
-                p.x + (Math.random() - 0.5) * 3,
-                1.5,
-                p.z + (Math.random() - 0.5) * 3,
-                (Math.random() - 0.5) * 7,
-                4 + Math.random() * 7,
-                (Math.random() - 0.5) * 7,
-                0.8 + Math.random() * 0.7,
-                0.9,
-                9.8,
-                k < 6 ? 0xfb923c : 0xe0f2fe,
+          const dxC = p.x - cx;
+          const dzC = p.z - cz;
+          if (Math.hypot(dxC, dzC) < 90 && p.y < 14) {
+            const cHeading = -this.carpathia.root.rotation.y;
+            const cFwdX = Math.sin(cHeading);
+            const cFwdZ = -Math.cos(cHeading);
+            const cRightX = Math.cos(cHeading);
+            const cRightZ = Math.sin(cHeading);
+            const along = dxC * cFwdX + dzC * cFwdZ;
+            const lat = dxC * cRightX + dzC * cRightZ;
+            if (Math.abs(along) < 82 && Math.abs(lat) < 14.5) {
+              impacted = true;
+              const isTorp = p.kind === 'torpedo';
+              for (let k = 0; k < 22; k++) {
+                this.particles.emit(
+                  p.x + (Math.random() - 0.5) * 3,
+                  1.5,
+                  p.z + (Math.random() - 0.5) * 3,
+                  (Math.random() - 0.5) * 8,
+                  4 + Math.random() * 8,
+                  (Math.random() - 0.5) * 8,
+                  0.8 + Math.random() * 0.7,
+                  0.9,
+                  9.8,
+                  k < 8 ? 0xfb923c : 0xe0f2fe,
+                );
+              }
+              this.damageAuxVessel(
+                this.carpathiaState,
+                isTorp ? 46 : 18,
+                p.x,
+                p.z,
+                isTorp ? 'BY U-BOAT TORPEDO' : 'BY U-BOAT SHELLFIRE',
+                lat >= 0 ? -1 : 1,
               );
             }
-            this.damageAuxVessel(
-              this.carpathiaState,
-              isTorp ? 38 : 14,
-              p.x,
-              p.z,
-              isTorp ? 'BY U-BOAT TORPEDO' : 'BY U-BOAT SHELLFIRE',
-              1,
-            );
           }
         }
-        // Check if submarine ordnance intercepts either intact Royal Navy Escort Warship
+        // Check if submarine torpedo or shell strikes either intact Royal Navy Escort Warship (oriented full-length hull bounds)
         if (!impacted && p.y < 14) {
           const wChecks = [
             { st: this.warship1State, x: this.warshipX, z: this.warshipZ, h: this.warshipHeadingRad },
@@ -3116,16 +3209,39 @@ export class TitanicEngine {
           for (let wi = 0; wi < wChecks.length; wi++) {
             const wc = wChecks[wi];
             if (wc.st.status !== 'intact') continue;
-            if (Math.hypot(p.x - wc.x, p.z - wc.z) < 24) {
+            const dxW = p.x - wc.x;
+            const dzW = p.z - wc.z;
+            if (Math.hypot(dxW, dzW) > 64) continue;
+            const wFwdX = Math.sin(wc.h);
+            const wFwdZ = -Math.cos(wc.h);
+            const wRightX = Math.cos(wc.h);
+            const wRightZ = Math.sin(wc.h);
+            const alongW = dxW * wFwdX + dzW * wFwdZ;
+            const latW = dxW * wRightX + dzW * wRightZ;
+            if (Math.abs(alongW) < 58 && Math.abs(latW) < 12.5) {
               impacted = true;
               const isTorp = p.kind === 'torpedo';
+              for (let k = 0; k < (isTorp ? 28 : 16); k++) {
+                this.particles.emit(
+                  p.x + (Math.random() - 0.5) * 3.2,
+                  1.5,
+                  p.z + (Math.random() - 0.5) * 3.2,
+                  (Math.random() - 0.5) * 9,
+                  4.5 + Math.random() * 8.5,
+                  (Math.random() - 0.5) * 9,
+                  0.85 + Math.random() * 0.75,
+                  0.95,
+                  9.8,
+                  k < (isTorp ? 12 : 6) ? 0xff7b29 : 0xe0f2fe,
+                );
+              }
               this.damageAuxVessel(
                 wc.st,
-                isTorp ? 35 : 12,
+                isTorp ? 54 : 24,
                 p.x,
                 p.z,
                 isTorp ? 'BY U-BOAT TORPEDO' : 'BY U-BOAT SHELLFIRE',
-                wi === 0 ? 1 : -1,
+                latW >= 0 ? -1 : 1,
               );
               break;
             }
@@ -3134,8 +3250,17 @@ export class TitanicEngine {
       } else if (p.ownerSide === 'warship') {
         const tgtSub = this.submarines[p.targetSubId];
         if (tgtSub && tgtSub.state === 'hunting') {
-          const distSub = Math.hypot(p.x - tgtSub.x, p.z - tgtSub.z);
-          if (distSub < 12.5 && p.y <= 5.5) {
+          const dxSub = p.x - tgtSub.x;
+          const dzSub = p.z - tgtSub.z;
+          const distSub = Math.hypot(dxSub, dzSub);
+          const sFwdX = Math.sin(tgtSub.headingRad);
+          const sFwdZ = -Math.cos(tgtSub.headingRad);
+          const sRightX = Math.cos(tgtSub.headingRad);
+          const sRightZ = Math.sin(tgtSub.headingRad);
+          const sAlong = dxSub * sFwdX + dzSub * sFwdZ;
+          const sLat = dxSub * sRightX + dzSub * sRightZ;
+          const hitSub = (distSub < 13.5 || (Math.abs(sAlong) < 33 && Math.abs(sLat) < 7.5)) && p.y <= 5.8;
+          if (hitSub) {
             impacted = true;
             tgtSub.hp -= 1;
             tgtSub.hitFireIntensity = 1.0;
@@ -3236,10 +3361,10 @@ export class TitanicEngine {
     sideSign = 1,
   ): void {
     if (st.status !== 'intact') return;
-    st.hp = Math.max(0, st.hp - Math.round(dmg));
     this.particles.burstIceImpact(hitX, 3.0, hitZ, 30);
     this.sound.playCollisionImpact(0.65);
 
+    st.hp = Math.max(0, st.hp - Math.round(dmg));
     if (st.hp <= 0) {
       st.status = 'sinking';
       st.sinkProgress = 0;
@@ -3675,8 +3800,9 @@ export class TitanicEngine {
     const wRightX = Math.cos(wh);
     const wRightZ = Math.sin(wh);
 
-    const wakeOffsetAlong = isSecondary ? 245 : 306;
-    const wakeOffsetLat = isSecondary ? 76 : -26;
+    const anySubHunting = !rescueWatch && this.submarines.some((s) => s.state === 'hunting');
+    const wakeOffsetAlong = anySubHunting ? (isSecondary ? -18 : -40) : isSecondary ? 245 : 306;
+    const wakeOffsetLat = anySubHunting ? (isSecondary ? 96 : -94) : isSecondary ? 76 : -26;
     const anchorX = isSecondary ? 92 : -86;
     const anchorZ = isSecondary ? -280 : -265;
     const rescueLat = isSecondary ? 105 : -84;
@@ -3688,7 +3814,7 @@ export class TitanicEngine {
       const alongAhead = relShipX * fwdX + relShipZ * fwdZ;
       const lateral = relShipX * rightX + relShipZ * rightZ;
 
-      if (!joined && this.shipZ <= -375) {
+      if (!joined && this.shipZ <= -220) {
         joined = true;
       }
 
@@ -3766,10 +3892,11 @@ export class TitanicEngine {
 
         const aheadOfWake = (wakeX - wx) * wFwdX + (wakeZ - wz) * wFwdZ;
         const titanicCruise = Math.max(0, this.speedKnots);
+        const maxEscortKnots = Math.max(34, titanicCruise + 8);
         if (distToWake > 42 && aheadOfWake > 0) {
-          desiredKnots = Math.min(28, Math.max(titanicCruise + 6.5, aheadOfWake * 0.24));
+          desiredKnots = Math.min(maxEscortKnots, Math.max(titanicCruise + 6.5, aheadOfWake * 0.24));
         } else {
-          desiredKnots = THREE.MathUtils.clamp(titanicCruise + aheadOfWake * 0.22, -4, 27);
+          desiredKnots = THREE.MathUtils.clamp(titanicCruise + aheadOfWake * 0.22, -4, maxEscortKnots);
         }
         if (Math.abs(this.speedKnots) < 0.8 && distToWake < 36) {
           desiredKnots = 0;
@@ -3969,11 +4096,8 @@ export class TitanicEngine {
     this.stepSingleWarship(dt, true, seaMix, rescueWatch);
   }
 
-  private manageIcebergField(dt: number, worldSpeed: number, fwdX: number, fwdZ: number): void {
-    const rightX = Math.cos(this.headingRad);
-    const rightZ = Math.sin(this.headingRad);
-
-    // Update drifting & bobbing icebergs + cull far behind
+  private manageIcebergField(dt: number, _worldSpeed: number, fwdX: number, fwdZ: number): void {
+    // Only a single iceberg appears in the game — update bobbing & rotation without spawning extra bergs
     for (let i = this.icebergs.length - 1; i >= 0; i--) {
       const b = this.icebergs[i];
       b.x += b.vx * dt;
@@ -3988,63 +4112,9 @@ export class TitanicEngine {
       const dz = b.z - this.shipZ;
       const along = dx * fwdX + dz * fwdZ;
       const distSq = dx * dx + dz * dz;
-      if (along < -230 || distSq > 620 * 620) {
+      if (along < -260 || distSq > 720 * 720) {
         this.scene.remove(b.group);
         this.icebergs.splice(i, 1);
-      }
-    }
-
-    // Spawn new iceberg rows ahead along current course
-    this.spawnAccumDist += Math.max(0, worldSpeed) * dt;
-    const difficulty = Math.min(1.35, this.distanceNm / 8.5);
-    const rowInterval = THREE.MathUtils.lerp(76, 48, Math.min(1, difficulty));
-
-    if (this.spawnAccumDist >= rowInterval && this.icebergs.length < 34) {
-      this.spawnAccumDist = 0;
-
-      // Always leave a guaranteed safe channel somewhere within [-95, +95] lateral offset (sized for 28m beam)
-      const safeLaneCenter = (Math.random() - 0.5) * 140;
-      const safeHalfWidth = THREE.MathUtils.lerp(34, 26, Math.min(1, difficulty));
-      const countInRow = Math.random() < 0.35 + difficulty * 0.35 ? 3 : 2;
-      const baseAhead = 370 + Math.random() * 80;
-
-      for (let c = 0; c < countInRow; c++) {
-        let lateral = (Math.random() - 0.5) * 280;
-        if (Math.abs(lateral - safeLaneCenter) < safeHalfWidth) {
-          lateral = safeLaneCenter + (lateral >= safeLaneCenter ? 1 : -1) * (safeHalfWidth + 16 + Math.random() * 26);
-        }
-
-        const ahead = baseAhead + (Math.random() - 0.5) * 40;
-        const sx = this.shipX + fwdX * ahead + rightX * lateral;
-        const sz = this.shipZ + fwdZ * ahead + rightZ * lateral;
-
-        // Avoid overlapping existing icebergs
-        let overlaps = false;
-        for (const ex of this.icebergs) {
-          if (Math.hypot(ex.x - sx, ex.z - sz) < ex.collisionRadius + 30) {
-            overlaps = true;
-            break;
-          }
-        }
-        if (overlaps) continue;
-
-        const r = Math.random();
-        const variant: IcebergVariant =
-          r < 0.36 ? 'growler' : r < 0.7 ? 'tabular' : 'pinnacle';
-        const scale = 0.85 + Math.random() * (0.45 + difficulty * 0.25);
-
-        // Growlers & some bergs slowly drift laterally across the sea lane after 2 NM
-        const driftMag = this.distanceNm > 1.8 ? (Math.random() - 0.5) * (3.2 + difficulty * 3.5) : 0;
-        const berg = this.iceFactory.spawnIceberg(
-          variant,
-          sx,
-          sz,
-          scale,
-          rightX * driftMag,
-          rightZ * driftMag,
-        );
-        this.icebergs.push(berg);
-        this.scene.add(berg.group);
       }
     }
   }
@@ -4062,20 +4132,23 @@ export class TitanicEngine {
     label: string,
     sideSign: number,
   ): void {
+    // Exceptionally durable reinforced hull; collision checks momentum briefly before telegraph re-accelerates
     this.combo = 1;
-    this.hullIntegrity = Math.max(0, this.hullIntegrity - Math.round(dmgRaw));
+    const effectiveDmg = Math.max(1, Math.round(dmgRaw * 0.22));
+    const effectiveFlood = floodJump * 0.24;
+    this.hullIntegrity = Math.max(0, this.hullIntegrity - effectiveDmg);
     this.listDirection = sideSign >= 0 ? 1 : -1;
-    this.headingRad += (sideSign >= 0 ? -1 : 1) * (isHeavyBow ? 0.07 : 0.12);
+    this.headingRad += (sideSign >= 0 ? -1 : 1) * (isHeavyBow ? 0.05 : 0.08);
     this.shipX += pushNx * pushDist;
     this.shipZ += pushNz * pushDist;
-    this.speedKnots *= isHeavyBow ? 0.32 : 0.58;
-    this.floodingPct = Math.min(100, this.floodingPct + floodJump);
+    this.speedKnots *= isHeavyBow ? 0.45 : 0.72;
+    this.floodingPct = Math.min(100, this.floodingPct + effectiveFlood);
 
-    this.hitstopTimer = isHeavyBow ? 0.065 : 0.045;
-    this.shakeIntensity = isHeavyBow ? 1.0 : 0.72;
-    this.damageFlashTimer = 0.45;
-    this.onDamageFlash(1.0);
-    this.particles.burstIceImpact(hitX, 3.2, hitZ, isHeavyBow ? 44 : 28);
+    this.hitstopTimer = isHeavyBow ? 0.05 : 0.035;
+    this.shakeIntensity = isHeavyBow ? 0.82 : 0.56;
+    this.damageFlashTimer = 0.4;
+    this.onDamageFlash(0.85);
+    this.particles.burstIceImpact(hitX, 3.2, hitZ, isHeavyBow ? 38 : 24);
     this.sound.playCollisionImpact(Math.max(0.45, speedRatio));
 
     if (!this.autopilotEnabled && label === 'NORTH ATLANTIC ICEBERG') {
@@ -4085,8 +4158,8 @@ export class TitanicEngine {
       this.eventText = 'ICEBERG STRIKE — PASSENGERS SCREAMING & RUSHING TO THE BOW!';
       this.eventTimer = 4.6;
     } else {
-      this.eventText = `COLLISION: ${label} — HULL BREACHED`;
-      this.eventTimer = 3.0;
+      this.eventText = `IMPACT: ${label} — REINFORCED HULL AT ${Math.round(this.hullIntegrity)}%`;
+      this.eventTimer = 2.8;
     }
     this.emitTelemetry();
   }

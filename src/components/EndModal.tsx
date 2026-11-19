@@ -27,25 +27,25 @@ export const EndModal: React.FC<EndModalProps> = ({
   const isVictory = phase === 'victory';
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center p-6 bg-[#03070e]/72">
-      <div className="bg-[#08101c] border border-[#c99c43]/65 rounded-sm max-w-md w-full p-7 text-center shadow-2xl">
-        <div className="text-[10px] tracking-[0.26em] uppercase text-[#d8b467] font-semibold mb-2">
+    <div className="fixed inset-0 z-30 flex items-center justify-center p-6 bg-slate-950/55 backdrop-blur-md font-sans-ui">
+      <div className="apple-glass-panel rounded-3xl max-w-md w-full p-7 md:p-8 text-center">
+        <div className="text-[10px] tracking-[0.22em] uppercase text-amber-200 font-semibold mb-2">
           {isPaused
-            ? 'BRIDGE WATCH PAUSED'
+            ? 'Bridge Watch Paused'
             : isVictory
-              ? 'OPEN WATER REACHED'
-              : 'NORTH ATLANTIC · 41°43′N 49°56′W'}
+              ? 'Open Water Reached'
+              : 'North Atlantic · 41°43′N 49°56′W'}
         </div>
 
-        <h2 className="font-maritime-serif text-3xl font-bold text-[#f4ebd2] tracking-wide mb-3">
+        <h2 className="font-display text-3xl font-bold text-white tracking-wide mb-3">
           {isPaused ? 'Hold Course' : isVictory ? 'Safe Passage' : 'Voyage Log'}
         </h2>
 
-        <p className="text-sm text-[#b9cbe0] mb-6 leading-relaxed">
+        <p className="text-sm text-slate-200/90 mb-6 leading-relaxed">
           {isPaused
             ? 'Orders are standing by in the wheelhouse.'
             : isVictory
-              ? 'You guided RMS Titanic cleanly past the North Atlantic ice barrier with hull integrity intact.'
+              ? 'You guided RMS Titanic swiftly to open Atlantic waters with her reinforced hull intact.'
               : telemetry.carpathiaStage === 'complete'
                 ? `Titanic broke amidships and sank beneath the Atlantic, while the Royal Navy Escort Warships${telemetry.submarinesSunk > 0 ? ` sank ${telemetry.submarinesSunk} attacking submarine(s)` : ''} and RMS Carpathia rescued all 712 survivors from the 16 lifeboats.`
                 : telemetry.carpathiaStage === 'boarding'
@@ -58,24 +58,24 @@ export const EndModal: React.FC<EndModalProps> = ({
         </p>
 
         {/* Voyage Summary Readout */}
-        <div className="grid grid-cols-3 gap-2 mb-6 bg-[#050b14] border border-[#c99c43]/25 p-3 rounded-sm">
+        <div className="grid grid-cols-3 gap-2 mb-6 apple-glass-subtle p-3.5 rounded-2xl">
           <div>
-            <div className="text-[10px] tracking-[0.14em] uppercase text-[#8ea4bd]">DISTANCE</div>
-            <div className="text-base font-bold text-[#f4ebd2] tabular-nums">
+            <div className="text-[10px] tracking-[0.12em] uppercase text-slate-300/75">Distance</div>
+            <div className="text-base font-bold text-white tabular-nums">
               {telemetry.distanceNm.toFixed(1)} NM
             </div>
           </div>
           <div>
-            <div className="text-[10px] tracking-[0.14em] uppercase text-[#8ea4bd]">
-              {phase === 'gameover' ? 'RESCUED' : 'NEAR MISSES'}
+            <div className="text-[10px] tracking-[0.12em] uppercase text-slate-300/75">
+              {phase === 'gameover' ? 'Rescued' : 'Near Misses'}
             </div>
-            <div className="text-base font-bold text-[#e6c373] tabular-nums">
+            <div className="text-base font-bold text-amber-200 tabular-nums">
               {phase === 'gameover' ? `${telemetry.survivorsRescued} / 712` : telemetry.nearMissCount}
             </div>
           </div>
           <div>
-            <div className="text-[10px] tracking-[0.14em] uppercase text-[#8ea4bd]">SCORE</div>
-            <div className="text-base font-bold text-[#f4ebd2] tabular-nums">
+            <div className="text-[10px] tracking-[0.12em] uppercase text-slate-300/75">Score</div>
+            <div className="text-base font-bold text-white tabular-nums">
               {telemetry.score.toLocaleString()}
             </div>
           </div>
@@ -87,9 +87,9 @@ export const EndModal: React.FC<EndModalProps> = ({
             <button
               type="button"
               onClick={onResume}
-              className="w-full py-3 bg-[#c99c43] hover:bg-[#dcb15a] text-[#08101c] font-bold tracking-[0.16em] uppercase text-xs rounded-sm cursor-pointer transition-colors"
+              className="apple-glass-gold hover:brightness-110 w-full py-3 text-amber-50 font-semibold tracking-[0.12em] uppercase text-xs rounded-2xl cursor-pointer transition-all"
             >
-              RESUME WATCH [ESC]
+              Resume Watch [Esc]
             </button>
           )}
 
@@ -97,40 +97,40 @@ export const EndModal: React.FC<EndModalProps> = ({
             <button
               type="button"
               onClick={onContinueEndless}
-              className="w-full py-3 bg-[#c99c43] hover:bg-[#dcb15a] text-[#08101c] font-bold tracking-[0.16em] uppercase text-xs rounded-sm cursor-pointer transition-colors"
+              className="apple-glass-gold hover:brightness-110 w-full py-3 text-amber-50 font-semibold tracking-[0.12em] uppercase text-xs rounded-2xl cursor-pointer transition-all"
             >
-              CONTINUE ENDLESS NIGHT WATCH
+              Continue Endless Night Watch
             </button>
           )}
 
           <button
             type="button"
             onClick={onRestart}
-            className={`w-full py-3 font-bold tracking-[0.16em] uppercase text-xs rounded-sm cursor-pointer transition-colors ${
+            className={`w-full py-3 font-semibold tracking-[0.12em] uppercase text-xs rounded-2xl cursor-pointer transition-all ${
               isPaused || isVictory
-                ? 'bg-[#0e1b2e] hover:bg-[#162944] text-[#e6c373] border border-[#c99c43]/45'
-                : 'bg-[#c99c43] hover:bg-[#dcb15a] text-[#08101c]'
+                ? 'apple-glass-subtle hover:bg-white/15 text-amber-100'
+                : 'apple-glass-gold hover:brightness-110 text-amber-50'
             }`}
           >
-            {isPaused ? 'RESTART VOYAGE' : 'SAIL AGAIN [ENTER]'}
+            {isPaused ? 'Restart Voyage' : 'Sail Again [Enter]'}
           </button>
 
           {phase === 'gameover' && (
             <button
               type="button"
               onClick={onObserveAftermath}
-              className="w-full py-2.5 bg-[#0e1b2e] hover:bg-[#162944] text-[#e6c373] border border-[#c99c43]/40 font-semibold tracking-[0.15em] uppercase text-[11px] rounded-sm cursor-pointer transition-colors"
+              className="apple-glass-subtle hover:bg-white/15 w-full py-2.5 text-amber-100 font-semibold tracking-[0.12em] uppercase text-[11px] rounded-2xl cursor-pointer transition-colors"
             >
-              RETURN TO OCEAN VIEW
+              Return To Ocean View
             </button>
           )}
 
           <button
             type="button"
             onClick={onReturnTitle}
-            className="w-full py-2.5 bg-transparent hover:bg-[#0e1b2e] text-[#9fb2c7] font-semibold tracking-[0.16em] uppercase text-[11px] rounded-sm cursor-pointer transition-colors"
+            className="w-full py-2.5 bg-transparent hover:bg-white/10 text-slate-300 font-semibold tracking-[0.12em] uppercase text-[11px] rounded-2xl cursor-pointer transition-colors"
           >
-            RETURN TO BRIDGE TITLE
+            Return To Bridge Title
           </button>
         </div>
       </div>

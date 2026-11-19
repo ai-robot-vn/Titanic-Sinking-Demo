@@ -73,9 +73,28 @@ function sampleHullStation(z: number): {
 }
 
 /**
- * Builds a watertight lofted 3D hull surface between yMinFrac and yMaxFrac.
- * When yMinFrac > 0, port and starboard flanks are lofted as separate ribbons
- * so the lower waterline edge never pinches inward to x = 0.
+ * Evaluates Olympic-class keel elevation profile (flat midships -6.5m,
+ * sweeping forefoot at bow stem, and graceful rising overhanging counter stern).
+ */
+function sampleKeelY(z: number): number {
+  if (z < -64) {
+    const t = THREE.MathUtils.clamp((-64 - z) / 10.0, 0, 1);
+    return -6.5 + 2.7 * t * t;
+  }
+  if (z > 168) {
+    if (z <= 185) {
+      const t = (z - 168) / 17.0;
+      return -6.5 + 2.3 * Math.pow(t, 1.3);
+    }
+    const u = THREE.MathUtils.clamp((z - 185) / 10.1, 0, 1);
+    return -4.2 + 7.6 * Math.pow(u, 0.85);
+  }
+  return -6.5;
+}
+
+/**
+ * Builds a watertight lofted 3D hull surface split at the waterline (y = 0.22m)
+ * or full depth while honoring sampleKeelY(z) for a true overhanging counter stern.
  */
 function buildLoftedHullSection(
   zSamples: number[],
@@ -88,25 +107,49 @@ function buildLoftedHullSection(
   const uvs: number[] = [];
   const indices: number[] = [];
   const includeKeel = yMinFrac <= 0.001;
+  const isLowerBand = includeKeel && yMaxFrac < 0.5;
+  const isUpperBand = !includeKeel && yMaxFrac > 0.9;
 
   const evalVertex = (z: number, side: number, frac: number): [number, number, number, number, number] => {
     const { beam, sheerY, flareFactor } = sampleHullStation(z);
     const vCoord = (z + 74) / 269.1;
-    const yBottom = -6.5;
+    const yKeel = sampleKeelY(z);
     const yTop = sheerY;
-    const y = THREE.MathUtils.lerp(yBottom, yTop, frac);
+
+    let y: number;
+    if (isLowerBand) {
+      const yMaxWL = Math.min(0.24, yTop - 0.08);
+      const yHigh = Math.max(yKeel + 0.02, yMaxWL);
+      const localU = yMaxFrac > 0 ? frac / yMaxFrac : 0;
+      y = THREE.MathUtils.lerp(yKeel, yHigh, localU);
+    } else if (isUpperBand) {
+      const yLow = Math.min(yTop - 0.04, Math.max(yKeel, 0.20));
+      const localU = (frac - yMinFrac) / Math.max(0.001, 1.0 - yMinFrac);
+      y = THREE.MathUtils.lerp(yLow, yTop, localU);
+    } else {
+      y = THREE.MathUtils.lerp(yKeel, yTop, frac);
+    }
+
+    const totalDepth = Math.max(0.35, yTop - yKeel);
+    const hullFrac = THREE.MathUtils.clamp((y - yKeel) / totalDepth, 0, 1);
 
     let widthRatio: number;
-    if (frac < 0.28) {
-      widthRatio = Math.sin(((frac / 0.28) * Math.PI) / 2) * 0.88;
+    if (hullFrac < 0.28) {
+      widthRatio = Math.sin(((hullFrac / 0.28) * Math.PI) / 2) * 0.88;
     } else {
-      const up = (frac - 0.28) / 0.72;
+      const up = (hullFrac - 0.28) / 0.72;
       widthRatio = 0.88 + up * 0.12 + up * up * flareFactor;
     }
 
-    const bowRake = z <= -72.0 ? -(frac * 1.9) : 0;
+    // Smooth elliptical overhang along counter stern above waterline
+    if (z > 180) {
+      const sternU = THREE.MathUtils.clamp((z - 180) / 15.1, 0, 1);
+      widthRatio *= 1.0 - sternU * 0.08 * (1.0 - hullFrac);
+    }
+
+    const bowRake = z <= -72.0 ? -(hullFrac * 1.9) : 0;
     const x = side * beam * widthRatio;
-    return [x, y, z + bowRake, vCoord * 8.0, frac];
+    return [x, y, z + bowRake, vCoord * 8.0, hullFrac];
   };
 
   if (includeKeel) {
@@ -426,11 +469,27 @@ export function buildTitanicShip(
     new THREE.MeshStandardMaterial({
       map: textures.steelHullAlbedo,
       normalMap: textures.steelHullNormal,
-      normalScale: new THREE.Vector2(1.45, 1.45),
-      color: 0x202936,
-      roughness: 0.42,
-      metalness: 0.54,
+      normalScale: new THREE.Vector2(1.55, 1.55),
+      color: 0xa8b4c4,
+      roughness: 0.36,
+      metalness: 0.42,
       side: THREE.DoubleSide,
+    }),
+  );
+
+  const bootTopMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1a2028,
+      roughness: 0.48,
+      metalness: 0.25,
+    }),
+  );
+
+  const spruceMastMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xa6743c,
+      roughness: 0.46,
+      metalness: 0.05,
     }),
   );
 
@@ -520,8 +579,16 @@ export function buildTitanicShip(
 
   const buffFunnelMat = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0xc99652,
-      roughness: 0.56,
+      color: 0xd99e5f,
+      roughness: 0.50,
+      metalness: 0.06,
+    }),
+  );
+
+  const pipeLaggingMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xded7c8,
+      roughness: 0.62,
       metalness: 0.08,
     }),
   );
@@ -609,30 +676,62 @@ export function buildTitanicShip(
     lowerHull.scale.set(0.999, 1, 0.9995);
     targetGrp.add(lowerHull);
 
-    // Gold Sheer Pinstripe & Raised Steel Belting Strake along Each Half
+    // Gold Sheer Pinstripe, Waterline Boot-Topping & Raised Steel Belting Strake along Each Half
     for (const side of [-1, 1]) {
       const stripePts: THREE.Vector3[] = [];
       const strakePts: THREE.Vector3[] = [];
+      const bootPts: THREE.Vector3[] = [];
       for (const z of stations) {
         const { beam, sheerY, flareFactor } = sampleHullStation(z);
         const xTop = side * (beam * (1 + flareFactor) + 0.08);
         stripePts.push(new THREE.Vector3(xTop, sheerY - 0.18, z <= -72.0 ? z - 1.75 : z));
-        strakePts.push(new THREE.Vector3(side * (beam * 0.95 + 0.08), 1.85, z));
+        strakePts.push(new THREE.Vector3(side * (beam * 0.95 + 0.08), Math.max(sampleKeelY(z) + 0.1, 1.85), z));
+        if (z <= 189.0) {
+          const yKeel = sampleKeelY(z);
+          const fracWL = THREE.MathUtils.clamp((0.24 - yKeel) / Math.max(0.35, sheerY - yKeel), 0, 1);
+          const wr =
+            fracWL < 0.28
+              ? Math.sin(((fracWL / 0.28) * Math.PI) / 2) * 0.88
+              : 0.88 + ((fracWL - 0.28) / 0.72) * 0.12;
+          bootPts.push(new THREE.Vector3(side * (beam * wr + 0.06), 0.22, z <= -72.0 ? z - 0.85 : z));
+        }
       }
       const curve = new THREE.CatmullRomCurve3(stripePts);
       targetGrp.add(new THREE.Mesh(trackGeo(new THREE.TubeGeometry(curve, 52, 0.1, 6, false)), goldStripeMat));
 
       const strakeCurve = new THREE.CatmullRomCurve3(strakePts);
       targetGrp.add(new THREE.Mesh(trackGeo(new THREE.TubeGeometry(strakeCurve, 46, 0.14, 6, false)), steelHullMat));
+
+      if (bootPts.length >= 2) {
+        const bootCurve = new THREE.CatmullRomCurve3(bootPts);
+        targetGrp.add(new THREE.Mesh(trackGeo(new THREE.TubeGeometry(bootCurve, 48, 0.22, 6, false)), bootTopMat));
+      }
     }
   }
 
-  // Sculpted Balanced Stern Rudder & Triple Bronze Propellers (z = +186..193 -> sternContent)
+  // Sculpted Sternpost Skeg, Balanced Rudder & Historical Triple Manganese-Bronze Propellers
+  // (Center 4-blade turbine prop r=1.85m, Twin Outboard 3-blade props r=2.45m)
+  const skegShape = new THREE.Shape();
+  skegShape.moveTo(168.0, -6.5);
+  skegShape.lineTo(185.0, -5.0);
+  skegShape.lineTo(188.6, -5.0);
+  skegShape.lineTo(188.6, -3.5);
+  skegShape.lineTo(184.5, -2.0);
+  skegShape.lineTo(189.5, 0.2);
+  skegShape.lineTo(185.0, 0.5);
+  skegShape.lineTo(168.0, -4.0);
+  skegShape.closePath();
+  const skegGeo = trackGeo(new THREE.ExtrudeGeometry(skegShape, { depth: 0.44, bevelEnabled: false }));
+  skegGeo.rotateY(Math.PI / 2);
+  const skegMesh = new THREE.Mesh(skegGeo, antiFoulMat);
+  skegMesh.position.set(-0.22, 0, 0);
+  sternContent.add(skegMesh);
+
   const rudderShape = new THREE.Shape();
-  rudderShape.moveTo(0, -4.8);
-  rudderShape.lineTo(3.2, -4.5);
-  rudderShape.quadraticCurveTo(3.6, -2.2, 3.3, 0.4);
-  rudderShape.lineTo(0, 0.6);
+  rudderShape.moveTo(0, -5.0);
+  rudderShape.lineTo(3.1, -4.7);
+  rudderShape.quadraticCurveTo(3.5, -2.4, 3.2, 0.25);
+  rudderShape.lineTo(0, 0.45);
   rudderShape.closePath();
   const rudderGeo = trackGeo(
     new THREE.ExtrudeGeometry(rudderShape, {
@@ -645,23 +744,28 @@ export function buildTitanicShip(
   );
   rudderGeo.rotateY(-Math.PI / 2);
   const sternRudder = new THREE.Mesh(rudderGeo, antiFoulMat);
-  sternRudder.position.set(0.17, 0, 190.8);
+  sternRudder.position.set(0.17, 0, 188.7);
   sternContent.add(sternRudder);
 
-  const centerProp = buildPropellerGroup(trackGeo, bronzeMat, 3, 2.1);
-  centerProp.position.set(0, -2.6, 189.6);
+  const centerProp = buildPropellerGroup(trackGeo, bronzeMat, 4, 1.85);
+  centerProp.position.set(0, -2.65, 186.6);
   sternContent.add(centerProp);
 
   for (const side of [-1, 1]) {
-    const wingProp = buildPropellerGroup(trackGeo, bronzeMat, 4, 2.35);
-    wingProp.position.set(side * 4.15, -2.2, 186.0);
+    const wingProp = buildPropellerGroup(trackGeo, bronzeMat, 3, 2.45);
+    wingProp.position.set(side * 4.25, -2.45, 183.4);
     sternContent.add(wingProp);
 
-    const boss = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.32, 0.48, 10.5, 10)), antiFoulMat);
+    const boss = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.32, 0.52, 12.2, 10)), antiFoulMat);
     boss.rotation.x = Math.PI / 2;
-    boss.rotation.z = side * -0.14;
-    boss.position.set(side * 3.1, -2.05, 181.0);
+    boss.rotation.z = side * -0.15;
+    boss.position.set(side * 3.1, -2.3, 177.8);
     sternContent.add(boss);
+
+    const aStrut = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.6, 0.28, 0.65)), antiFoulMat);
+    aStrut.position.set(side * 2.45, -1.8, 182.8);
+    aStrut.rotation.z = side * 0.32;
+    sternContent.add(aStrut);
   }
 
   // =========================================================================
@@ -917,14 +1021,20 @@ export function buildTitanicShip(
   };
 
   for (const side of [-1, 1]) {
-    const { beam } = sampleHullStation(-65);
-    const hawseRing = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.48, 0.11, 8, 16)), darkIronMat);
+    const { beam, sheerY } = sampleHullStation(-65);
+    const bolsterPlate = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.76, 0.86, 0.34, 14)), darkIronMat);
+    bolsterPlate.rotation.z = Math.PI / 2;
+    bolsterPlate.rotation.y = -side * 0.32;
+    bolsterPlate.position.set(side * (beam + 0.05), sheerY - 2.05, -65);
+    bowContent.add(bolsterPlate);
+
+    const hawseRing = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.52, 0.13, 8, 16)), darkIronMat);
     hawseRing.rotation.y = Math.PI / 2 - side * 0.32;
-    hawseRing.position.set(side * (beam + 0.16), 7.6, -65);
+    hawseRing.position.set(side * (beam + 0.16), sheerY - 2.05, -65);
     bowContent.add(hawseRing);
 
     const anchor = buildAnchorMesh();
-    anchor.position.set(side * (beam + 0.34), 7.25, -65);
+    anchor.position.set(side * (beam + 0.30), sheerY - 2.38, -65);
     anchor.rotation.y = Math.PI / 2 - side * 0.32;
     bowContent.add(anchor);
   }
@@ -933,7 +1043,7 @@ export function buildTitanicShip(
   spareAnchor.position.set(0, 9.38, -64.0);
   bowContent.add(spareAnchor);
 
-  // Cargo Hatches & Curved Cargo Cranes in Forward & Aft Well Decks
+  // Cargo Hatches & 8 Electric Luffing Cargo Cranes (Forward & Aft Decks)
   for (const hz of [-28.5, -18.0, 155.0, 163.5]) {
     const parentGrp = hz < BREAK_Z ? bowContent : sternContent;
     const hatchCoaming = new THREE.Mesh(
@@ -951,24 +1061,42 @@ export function buildTitanicShip(
     parentGrp.add(hatchCover);
   }
 
-  // 4 Well-Deck Cargo Cranes (2 Forward, 2 Aft)
+  // 8 Electric Luffing Cargo Cranes with Slewing Pedestals & Hoist Cables
   const wellCraneCurve = new THREE.CatmullRomCurve3([
     new THREE.Vector3(0, 0, 0),
-    new THREE.Vector3(0, 3.8, 0),
-    new THREE.Vector3(0, 5.2, 1.5),
-    new THREE.Vector3(0, 5.6, 3.6),
+    new THREE.Vector3(0, 3.6, 0),
+    new THREE.Vector3(0, 5.2, 1.45),
+    new THREE.Vector3(0, 5.8, 3.85),
   ]);
   const wellCraneGeo = trackGeo(new THREE.TubeGeometry(wellCraneCurve, 12, 0.16, 8, false));
-  for (const [cx, cz, ry] of [
-    [-7.2, -14.5, -0.5],
-    [7.2, -14.5, 0.5],
-    [-6.8, 152.0, 2.6],
-    [6.8, 152.0, -2.6],
+  const cranePedestalGeo = trackGeo(new THREE.CylinderGeometry(0.36, 0.48, 1.4, 10));
+  const craneSheaveGeo = trackGeo(new THREE.CylinderGeometry(0.18, 0.18, 0.1, 10));
+  craneSheaveGeo.rotateZ(Math.PI / 2);
+  const craneCableGeo = trackGeo(new THREE.CylinderGeometry(0.025, 0.025, 3.6, 6));
+  for (const [cx, cy, cz, ry] of [
+    [-7.2, 6.6, -24.5, -0.45],
+    [7.2, 6.6, -24.5, 0.45],
+    [-7.6, 6.6, -14.2, -0.55],
+    [7.6, 6.6, -14.2, 0.55],
+    [-7.2, 6.6, 152.0, 2.6],
+    [7.2, 6.6, 152.0, -2.6],
+    [-6.6, 6.6, 165.5, 2.75],
+    [6.6, 6.6, 165.5, -2.75],
   ]) {
-    const cr = new THREE.Mesh(wellCraneGeo, whitePaintMat);
-    cr.position.set(cx, 6.6, cz);
-    cr.rotation.y = ry;
-    (cz < BREAK_Z ? bowContent : sternContent).add(cr);
+    const crGrp = new THREE.Group();
+    crGrp.position.set(cx, cy, cz);
+    crGrp.rotation.y = ry;
+    const ped = new THREE.Mesh(cranePedestalGeo, whitePaintMat);
+    ped.position.y = 0.7;
+    crGrp.add(ped);
+    crGrp.add(new THREE.Mesh(wellCraneGeo, whitePaintMat));
+    const sheave = new THREE.Mesh(craneSheaveGeo, darkIronMat);
+    sheave.position.set(0, 5.8, 3.85);
+    crGrp.add(sheave);
+    const hoistCable = new THREE.Mesh(craneCableGeo, darkIronMat);
+    hoistCable.position.set(0, 4.0, 3.85);
+    crGrp.add(hoistCable);
+    (cz < BREAK_Z ? bowContent : sternContent).add(crGrp);
   }
 
   // Turned Goose-Neck Cowl Ventilators along Decks
@@ -1074,10 +1202,59 @@ export function buildTitanicShip(
       }
     }
   };
-  addHullEdgeRail(bowContent, [-73.8, -64, -52, -40, -35.2]);
-  addHullEdgeRail(bowContent, [-34.6, -26, -18, -10.5]);
-  addHullEdgeRail(sternContent, [148.5, 156, 163, 169.5]);
+  // Open White Railings on Forecastle Bow Tip & Poop Deck + Solid Steel Well-Deck Bulwarks
+  addHullEdgeRail(bowContent, [-73.8, -66, -58]);
   addHullEdgeRail(sternContent, [170.5, 178, 185, 191, 194.8]);
+
+  const addHullBulwark = (targetGrp: THREE.Group, zList: number[], height = 1.06) => {
+    const wallH = height - 0.08;
+    for (const side of [-1, 1] as const) {
+      const outerPos: number[] = [];
+      const outerIdx: number[] = [];
+      const innerPos: number[] = [];
+      const innerIdx: number[] = [];
+      const railPts: THREE.Vector3[] = [];
+      for (let i = 0; i < zList.length; i++) {
+        const z = zList[i];
+        const { beam, sheerY, flareFactor } = sampleHullStation(z);
+        const rx = side * Math.max(0.2, beam * (1 + flareFactor) - 0.04);
+        const rxIn = side * Math.max(0.1, Math.abs(rx) - 0.12);
+        const yBot = sheerY - 0.05;
+        const yTop = sheerY + wallH;
+        outerPos.push(rx, yBot, z, rx, yTop, z);
+        innerPos.push(rxIn, yBot, z, rxIn, yTop, z);
+        railPts.push(new THREE.Vector3((rx + rxIn) * 0.5, yTop + 0.04, z));
+        if (i < zList.length - 1) {
+          const a = i * 2;
+          const b = (i + 1) * 2;
+          if (side > 0) {
+            outerIdx.push(a, a + 1, b, b, a + 1, b + 1);
+            innerIdx.push(a, b, a + 1, b, b + 1, a + 1);
+          } else {
+            outerIdx.push(a, b, a + 1, b, b + 1, a + 1);
+            innerIdx.push(a, a + 1, b, b, a + 1, b + 1);
+          }
+        }
+      }
+      const oGeo = trackGeo(new THREE.BufferGeometry());
+      oGeo.setAttribute('position', new THREE.Float32BufferAttribute(outerPos, 3));
+      oGeo.setIndex(outerIdx);
+      oGeo.computeVertexNormals();
+      targetGrp.add(new THREE.Mesh(oGeo, steelHullMat));
+
+      const iGeo = trackGeo(new THREE.BufferGeometry());
+      iGeo.setAttribute('position', new THREE.Float32BufferAttribute(innerPos, 3));
+      iGeo.setIndex(innerIdx);
+      iGeo.computeVertexNormals();
+      targetGrp.add(new THREE.Mesh(iGeo, whitePaintMat));
+
+      const capGeo = trackGeo(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(railPts), zList.length * 4, 0.07, 6, false));
+      targetGrp.add(new THREE.Mesh(capGeo, teakDeckMat));
+    }
+  };
+  addHullBulwark(bowContent, [-58, -50, -42, -35.2], 1.04);
+  addHullBulwark(bowContent, [-34.6, -26, -18, -10.5], 1.12);
+  addHullBulwark(sternContent, [148.5, 155, 162, 169.5], 1.12);
 
   // =========================================================================
   // 3. 158-METER MULTI-TIER SUPERSTRUCTURE (HOLLOW AROUND ACCESSIBLE INTERIORS)
@@ -1252,7 +1429,7 @@ export function buildTitanicShip(
     tgt.add(inst);
   }
 
-  // Boat Deck Exterior Houses (Officer's Quarters, Lounge Clerestory Roof, Aft Houses)
+  // Boat Deck Exterior Houses + Windows & Teak Doors
   const deckhouses: Array<[number, number, number, number]> = [
     [6.6, 2.0, 20.5, 2.5], // Officer's Quarters
     [6.2, 64.0, 81.5, 2.15], // First Class Lounge Clerestory Roof House
@@ -1260,11 +1437,34 @@ export function buildTitanicShip(
     [6.0, 118.5, 130.5, 2.2], // Aft Grand Staircase
     [5.6, 135.5, 145.5, 2.0], // Second Class Entrance House
   ];
+  const deckHouseWinGeo = trackGeo(new THREE.PlaneGeometry(0.86, 0.72));
+  const deckHouseFrameGeo = trackGeo(new THREE.BoxGeometry(0.05, 0.80, 0.94));
+  const deckHouseDoorGeo = trackGeo(new THREE.BoxGeometry(0.06, 1.85, 0.82));
   for (const [hw, z0, z1, h] of deckhouses) {
+    const tgt = z0 < BREAK_Z ? bowContent : sternContent;
     const house = new THREE.Mesh(trackGeo(buildCurvedDeckhouseGeo(hw, z0, z1, h, 0.8, 0.8, 0.08)), whitePaintMat);
     house.position.y = 12.86;
     house.castShadow = true;
-    (z0 < BREAK_Z ? bowContent : sternContent).add(house);
+    tgt.add(house);
+
+    for (const side of [-1, 1] as const) {
+      for (let wz = z0 + 2.1; wz <= z1 - 2.1; wz += 2.65) {
+        const isDoor = Math.abs(wz - (z0 + z1) * 0.5) < 1.2;
+        if (isDoor) {
+          const door = new THREE.Mesh(deckHouseDoorGeo, mahoganyMat);
+          door.position.set(side * (hw + 0.08), 13.82, wz);
+          tgt.add(door);
+        } else {
+          const fr = new THREE.Mesh(deckHouseFrameGeo, creamTrimMat);
+          fr.position.set(side * (hw + 0.07), 13.98, wz);
+          tgt.add(fr);
+          const gl = new THREE.Mesh(deckHouseWinGeo, portholeGlowMat);
+          gl.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+          gl.position.set(side * (hw + 0.105), 13.98, wz);
+          tgt.add(gl);
+        }
+      }
+    }
   }
 
   // Hollow Forward Grand Staircase Boat-Deck Enclosure (z = 27.6..38.8) beneath the Dome
@@ -1345,7 +1545,21 @@ export function buildTitanicShip(
     tgt.add(domeRim);
   }
 
-  // Cantilevered Bridge Wings flush with Boat Deck (y = 12.58..12.88) extending to +/- 15.4m
+  // Open Navigating Bridge Front Walkway, Canvas Dodger, Wing Cabs & Nav Light Boxes
+  const navWalkway = new THREE.Mesh(
+    trackGeo(buildCurvedDeckhouseGeo(15.4, -2.5, -1.55, 0.28, 0.25, 0.1, 0.0)),
+    teakDeckMat,
+  );
+  navWalkway.position.y = 12.58;
+  bowContent.add(navWalkway);
+
+  const centerFrontDodger = new THREE.Mesh(
+    trackGeo(buildCurvedDeckhouseGeo(4.48, -2.48, -2.26, 1.08, 0.16, 0.06, 0.01)),
+    whitePaintMat,
+  );
+  centerFrontDodger.position.y = 12.86;
+  bowContent.add(centerFrontDodger);
+
   const bridgeWingDeck = new THREE.Mesh(
     trackGeo(buildCurvedDeckhouseGeo(15.4, -2.3, 1.8, 0.3, 0.35, 0.35, 0.0)),
     teakDeckMat,
@@ -1398,11 +1612,22 @@ export function buildTitanicShip(
       bowContent.add(knee);
     }
 
+    // Port & Starboard Light Screen Baffle Boxes + Inner Navigation Lamp Lens
+    const navScreenBack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.1, 0.62, 0.72)), whitePaintMat);
+    navScreenBack.position.set(side * 15.05, 14.34, -1.78);
+    bowContent.add(navScreenBack);
+    const navScreenBottom = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.56, 0.08, 0.72)), whitePaintMat);
+    navScreenBottom.position.set(side * 15.28, 14.04, -1.78);
+    bowContent.add(navScreenBottom);
+    const navScreenAft = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.56, 0.62, 0.08)), whitePaintMat);
+    navScreenAft.position.set(side * 15.28, 14.34, -1.44);
+    bowContent.add(navScreenAft);
+
     const navLight = new THREE.Mesh(
-      trackGeo(new THREE.SphereGeometry(0.25, 12, 12)),
+      trackGeo(new THREE.SphereGeometry(0.20, 12, 12)),
       side < 0 ? portLightMat : starboardLightMat,
     );
-    navLight.position.set(side * 15.32, 14.32, -2.0);
+    navLight.position.set(side * 15.32, 14.34, -1.86);
     bowContent.add(navLight);
   }
 
@@ -1459,8 +1684,24 @@ export function buildTitanicShip(
     funnelGroup.add(topLip);
 
     const darkFlue = new THREE.Mesh(funnelFlueGeo, darkIronMat);
-    darkFlue.position.y = 19.48;
+    darkFlue.position.y = 19.44;
     funnelGroup.add(darkFlue);
+
+    // Internal structural funnel top spider-grate stay bars
+    const grateBarGeo = trackGeo(new THREE.BoxGeometry(4.95, 0.09, 0.14));
+    for (let gi = 0; gi < 4; gi++) {
+      const bar = new THREE.Mesh(grateBarGeo, darkIronMat);
+      bar.position.y = 19.52;
+      bar.rotation.y = (gi * Math.PI) / 4;
+      funnelGroup.add(bar);
+    }
+
+    // Raised Boiler Fidley Glazed Skylights flanking each funnel
+    for (const fSide of [-1, 1]) {
+      const skyBox = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.95, 0.42, 3.1)), whitePaintMat);
+      skyBox.position.set(fSide * 3.85, 1.15, 0);
+      funnelGroup.add(skyBox);
+    }
 
     for (const px of [-0.35, 0.35]) {
       const pipe = new THREE.Mesh(funnelPipeGeo, brassMat);
@@ -1518,49 +1759,31 @@ export function buildTitanicShip(
   );
 
   // =========================================================================
-  // 5. 400+ BRASS-RIMMED PORTHOLES & GLOWING PROMENADE WINDOWS
+  // 5. HULL BRASS PORTHOLES & RECTANGULAR WHITE STAR LINE WINDOWS
   // =========================================================================
-  const portholeGeo = trackGeo(new THREE.CircleGeometry(0.28, 12));
-  const brassRimGeo = trackGeo(new THREE.RingGeometry(0.26, 0.35, 12));
-  const portholePositions: Array<{ x: number; y: number; z: number; rotY: number; scaleX: number }> = [];
+  const portholeGeo = trackGeo(new THREE.CircleGeometry(0.24, 12));
+  const brassRimGeo = trackGeo(new THREE.RingGeometry(0.22, 0.31, 12));
+  const portholePositions: Array<{ x: number; y: number; z: number; rotY: number }> = [];
 
   for (const side of [-1, 1]) {
-    for (let z = -58; z <= 184; z += 4.6) {
+    for (let z = -58; z <= 184; z += 4.2) {
       const { beam, sheerY } = sampleHullStation(z);
       const { beam: beamNext } = sampleHullStation(z + 1.5);
       const slopeAngle = Math.atan2((beamNext - beam) * side, 1.5);
+      const yKeel = sampleKeelY(z);
 
       for (const dy of [1.4, 3.0, 4.5]) {
         const x = side * (beam * 0.99 + 0.08);
         const y = sheerY - dy;
-        if (y > 1.2) {
+        if (y > Math.max(1.2, yKeel + 0.85)) {
           portholePositions.push({
             x,
             y,
             z,
             rotY: (side > 0 ? Math.PI / 2 : -Math.PI / 2) - slopeAngle,
-            scaleX: 1,
           });
         }
       }
-    }
-
-    // Glowing Promenade & Cabin Windows along B-Deck & A-Deck (158m long!)
-    for (let z = -7; z <= 144; z += 2.9) {
-      portholePositions.push({
-        x: side * 13.48,
-        y: 8.35,
-        z,
-        rotY: side > 0 ? Math.PI / 2 : -Math.PI / 2,
-        scaleX: 1.9,
-      });
-      portholePositions.push({
-        x: side * 11.43,
-        y: 11.25,
-        z,
-        rotY: side > 0 ? Math.PI / 2 : -Math.PI / 2,
-        scaleX: 2.05,
-      });
     }
   }
 
@@ -1578,7 +1801,7 @@ export function buildTitanicShip(
       const p = list[i];
       pDummy.position.set(p.x, p.y, p.z);
       pDummy.rotation.set(0, p.rotY, 0);
-      pDummy.scale.set(p.scaleX, 1, 1);
+      pDummy.scale.set(1, 1, 1);
       pDummy.updateMatrix();
       pInst.setMatrixAt(i, pDummy.matrix);
 
@@ -1594,13 +1817,97 @@ export function buildTitanicShip(
     tgt.add(rInst);
   }
 
+  // Rectangular Multi-Pane Cabin & Promenade Windows along B-Deck, A-Deck & Curved Bridge Front
+  const rectWinGlassGeo = trackGeo(new THREE.PlaneGeometry(1.14, 0.92));
+  const rectWinFrameGeo = trackGeo(new THREE.BoxGeometry(1.26, 1.04, 0.06));
+  const rectWinMuntinGeo = trackGeo(new THREE.BoxGeometry(0.06, 0.96, 0.08));
+  const rectWindows: Array<{ x: number; y: number; z: number; rotY: number; sy: number }> = [];
+
+  for (const side of [-1, 1]) {
+    for (let z = -7.0; z <= 144.0; z += 2.65) {
+      if (Math.abs(z - BREAK_Z) < 0.85) continue;
+      // B-Deck rectangular stateroom windows
+      rectWindows.push({
+        x: side * 13.52,
+        y: 8.32,
+        z,
+        rotY: side > 0 ? Math.PI / 2 : -Math.PI / 2,
+        sy: 0.95,
+      });
+      // A-Deck promenade bulkhead windows (skip Lounge glazed opening at z = 64..81.5)
+      if (z < 64.0 || z > 81.5) {
+        rectWindows.push({
+          x: side * 11.46,
+          y: 11.30,
+          z,
+          rotY: side > 0 ? Math.PI / 2 : -Math.PI / 2,
+          sy: 1.12,
+        });
+      }
+    }
+  }
+  // Curved forward B-Deck & A-Deck bridge-front observation windows overlooking well deck
+  for (let wx = -10.5; wx <= 10.5; wx += 2.62) {
+    const bU = 1 - Math.sqrt(Math.max(0.02, 1 - Math.abs(wx) / 13.45));
+    const bArcZ = -10.08 + 3.0 * bU * bU;
+    const bSlopeZ = Math.sign(wx) * ((3.0 * bU) / (13.45 * Math.sqrt(Math.max(0.02, 1 - Math.abs(wx) / 13.45))));
+    rectWindows.push({ x: wx, y: 8.32, z: bArcZ, rotY: Math.PI - Math.atan2(bSlopeZ, 1), sy: 0.95 });
+
+    if (Math.abs(wx) <= 8.5) {
+      const aU = 1 - Math.sqrt(Math.max(0.02, 1 - Math.abs(wx) / 11.35));
+      const aArcZ = -9.28 + 2.6 * aU * aU;
+      const aSlopeZ = Math.sign(wx) * ((2.6 * aU) / (11.35 * Math.sqrt(Math.max(0.02, 1 - Math.abs(wx) / 11.35))));
+      rectWindows.push({ x: wx, y: 11.30, z: aArcZ, rotY: Math.PI - Math.atan2(aSlopeZ, 1), sy: 1.08 });
+    }
+  }
+
+  for (const [list, tgt] of [
+    [rectWindows.filter((w) => w.z < BREAK_Z), bowContent],
+    [rectWindows.filter((w) => w.z >= BREAK_Z), sternContent],
+  ] as const) {
+    const wGlassInst = new THREE.InstancedMesh(rectWinGlassGeo, portholeGlowMat, list.length);
+    const wFrameInst = new THREE.InstancedMesh(rectWinFrameGeo, creamTrimMat, list.length);
+    const wMuntinInst = new THREE.InstancedMesh(rectWinMuntinGeo, whitePaintMat, list.length);
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      const nx = Math.sin(w.rotY);
+      const nz = Math.cos(w.rotY);
+      pDummy.position.set(w.x, w.y, w.z);
+      pDummy.rotation.set(0, w.rotY, 0);
+      pDummy.scale.set(1, w.sy, 1);
+      pDummy.updateMatrix();
+      wFrameInst.setMatrixAt(i, pDummy.matrix);
+      wMuntinInst.setMatrixAt(i, pDummy.matrix);
+
+      pDummy.position.set(w.x + nx * 0.036, w.y, w.z + nz * 0.036);
+      pDummy.updateMatrix();
+      wGlassInst.setMatrixAt(i, pDummy.matrix);
+    }
+    wGlassInst.instanceMatrix.needsUpdate = true;
+    wFrameInst.instanceMatrix.needsUpdate = true;
+    wMuntinInst.instanceMatrix.needsUpdate = true;
+    wGlassInst.computeBoundingSphere();
+    wFrameInst.computeBoundingSphere();
+    wMuntinInst.computeBoundingSphere();
+    tgt.add(wFrameInst, wMuntinInst, wGlassInst);
+  }
+
   // =========================================================================
-  // 6. FOREMAST, CROW'S NEST, AFT MAINMAST, SHROUDS & 200m MARCONI AERIALS
+  // 6. 2-STAGE STEEL/SPRUCE FOREMAST, CROW'S NEST, MAINMAST & MARCONI AERIALS
   // =========================================================================
-  const foremast = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.16, 0.38, 42.5, 14)), buffFunnelMat);
-  foremast.position.set(0, 27.25, -22.5);
-  foremast.castShadow = true;
-  bowContent.add(foremast);
+  const foremastLower = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.24, 0.39, 23.2, 14)), buffFunnelMat);
+  foremastLower.position.set(0, 17.6, -22.5);
+  foremastLower.castShadow = true;
+  bowContent.add(foremastLower);
+
+  const foremastUpper = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.24, 19.6, 12)), spruceMastMat);
+  foremastUpper.position.set(0, 38.8, -22.5);
+  foremastUpper.castShadow = true;
+  bowContent.add(foremastUpper);
+
+  const foremastTable = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.46, 0.32, 0.42, 12)), whitePaintMat);
+  foremastTable.position.set(0, 29.2, -22.5);
+  bowContent.add(foremastTable);
 
   const foremastCollar = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.46, 0.62, 0.72, 14)), whitePaintMat);
   foremastCollar.position.set(0, 6.72, -22.5);
@@ -1621,31 +1928,36 @@ export function buildTitanicShip(
   bowContent.add(crowsNestRim);
 
   const mastLantern = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.28, 12, 12)), warmGlowMat);
-  mastLantern.position.set(0, 31.8, -22.5);
+  mastLantern.position.set(0, 31.8, -22.92);
   bowContent.add(mastLantern);
 
-  const yardarm = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.12, 12.6, 10)), buffFunnelMat);
+  const yardarm = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.12, 12.6, 10)), spruceMastMat);
   yardarm.rotation.z = Math.PI / 2;
   yardarm.position.set(0, 36.2, -22.5);
   bowContent.add(yardarm);
 
-  // Aft Mainmast (z = 178)
-  const mainMast = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.16, 0.36, 40.5, 14)), buffFunnelMat);
-  mainMast.position.set(0, 27.25, 178.0);
-  mainMast.rotation.x = 0.06;
-  sternContent.add(mainMast);
+  // Aft Mainmast (2-stage buff steel lower + varnished spruce topmast, z = 178)
+  const mainMastLower = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.23, 0.36, 21.5, 14)), buffFunnelMat);
+  mainMastLower.position.set(0, 17.8, 177.4);
+  mainMastLower.rotation.x = 0.06;
+  sternContent.add(mainMastLower);
+
+  const mainMastUpper = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.23, 19.6, 12)), spruceMastMat);
+  mainMastUpper.position.set(0, 37.9, 178.6);
+  mainMastUpper.rotation.x = 0.06;
+  sternContent.add(mainMastUpper);
 
   const mainMastCollar = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.44, 0.6, 0.72, 14)), whitePaintMat);
   mainMastCollar.position.set(0, 8.6, 176.86);
   sternContent.add(mainMastCollar);
 
-  const mainYardarm = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.12, 11.0, 10)), buffFunnelMat);
+  const mainYardarm = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.12, 11.0, 10)), spruceMastMat);
   mainYardarm.rotation.z = Math.PI / 2;
   mainYardarm.position.set(0, 36.0, 178.52);
   sternContent.add(mainYardarm);
 
   const sternLantern = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.26, 10, 10)), warmGlowMat);
-  sternLantern.position.set(0, 31.5, 178.25);
+  sternLantern.position.set(0, 31.5, 178.55);
   sternContent.add(sternLantern);
 
   // Wire Shrouds, Forestay & 200-meter 4-Wire Marconi Aerial Array (Aerials snap at breakup!)
@@ -1820,31 +2132,50 @@ export function buildTitanicShip(
     addCable(sternContent, new THREE.Vector3(0, 22.8, 178.1), new THREE.Vector3(side * 3.8, 17.4, 166.0), 0.024);
   }
 
-  // (e) Forward A-Deck Enclosed Promenade Screen (z = -6.8..46, flush with A-Deck & Boat Deck corners)
-  const mullionGeo = trackGeo(new THREE.BoxGeometry(0.12, 2.78, 0.24));
-  const waistPanelGeo = trackGeo(new THREE.BoxGeometry(0.1, 0.98, 52.8));
+  // (e) Signature Titanic Forward Half-Enclosed A-Deck Promenade (z = -7.5..58.0)
+  const mullionGeo = trackGeo(new THREE.BoxGeometry(0.14, 2.78, 0.28));
+  const horizMullionGeo = trackGeo(new THREE.BoxGeometry(0.08, 0.09, 65.5));
+  const waistPanelGeo = trackGeo(new THREE.BoxGeometry(0.14, 1.06, 65.5));
+  const headerPlateGeo = trackGeo(new THREE.BoxGeometry(0.14, 0.42, 65.5));
+  const screenGlassGeo = trackGeo(new THREE.PlaneGeometry(65.3, 1.24));
   for (const side of [-1, 1]) {
     const waist = new THREE.Mesh(waistPanelGeo, whitePaintMat);
-    waist.position.set(side * 13.36, 10.35, 19.6);
+    waist.position.set(side * 13.36, 10.38, 25.25);
     bowContent.add(waist);
 
+    const topPlate = new THREE.Mesh(headerPlateGeo, whitePaintMat);
+    topPlate.position.set(side * 13.36, 12.40, 25.25);
+    bowContent.add(topPlate);
+
+    const midBar = new THREE.Mesh(horizMullionGeo, whitePaintMat);
+    midBar.position.set(side * 13.36, 11.55, 25.25);
+    bowContent.add(midBar);
+
+    const screenGlass = new THREE.Mesh(screenGlassGeo, bridgeGlassMat);
+    screenGlass.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+    screenGlass.position.set(side * 13.38, 11.56, 25.25);
+    screenGlass.renderOrder = 5;
+    bowContent.add(screenGlass);
+
     // Angled forward corner screen closing enclosed promenade flush into A-Deck house wall
-    const endScreen = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.2, 2.78, 0.14)), whitePaintMat);
-    endScreen.position.set(side * 12.35, 11.24, -6.8);
+    const endScreen = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.2, 2.78, 0.16)), whitePaintMat);
+    endScreen.position.set(side * 12.35, 11.24, -7.45);
     bowContent.add(endScreen);
   }
-  const fwdScreenCount = 27 * 2;
+  const fwdScreenCount = 34 * 2;
   const fwdScreenInst = new THREE.InstancedMesh(mullionGeo, whitePaintMat, fwdScreenCount);
   let mIdx = 0;
   for (const side of [-1, 1]) {
-    for (let i = 0; i < 27; i++) {
-      sDummy.position.set(side * 13.38, 11.24, -6.5 + i * 1.98);
+    for (let i = 0; i < 34; i++) {
+      sDummy.position.set(side * 13.38, 11.24, -7.2 + i * 1.97);
       sDummy.rotation.set(0, 0, 0);
+      sDummy.scale.set(1, 1, 1);
       sDummy.updateMatrix();
       fwdScreenInst.setMatrixAt(mIdx++, sDummy.matrix);
     }
   }
   fwdScreenInst.instanceMatrix.needsUpdate = true;
+  fwdScreenInst.computeBoundingSphere();
   bowContent.add(fwdScreenInst);
 
   // (f) Continuous Boat Deck Teak-Capped Railings (Strictly partitioned at BREAK_Z)
@@ -2141,6 +2472,33 @@ export function buildTitanicShip(
   );
   whRoof.position.y = 2.95;
   wheelhouse.add(whRoof);
+
+  // Wheelhouse Roof "Monkey Island" Compass Platform (y = 3.12 local -> 16.02 world)
+  const monkeyDeck = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.4, 0.1, 3.0)), teakDeckMat);
+  monkeyDeck.position.set(0, 3.16, 0.85);
+  wheelhouse.add(monkeyDeck);
+  buildRailSegment(wheelhouse, -2.2, 3.21, -0.65, 2.2, 3.21, -0.65);
+  buildRailSegment(wheelhouse, -2.2, 3.21, 2.35, 2.2, 3.21, 2.35);
+  buildRailSegment(wheelhouse, -2.2, 3.21, -0.65, -2.2, 3.21, 2.35);
+  buildRailSegment(wheelhouse, 2.2, 3.21, -0.65, 2.2, 3.21, 2.35);
+  for (const mx of [-2.2, 0, 2.2]) {
+    for (const mz of [-0.65, 0.85, 2.35]) {
+      const mPost = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.035, 0.035, 1.04, 6)), whitePaintMat);
+      mPost.position.set(mx, 3.72, mz);
+      wheelhouse.add(mPost);
+    }
+  }
+  const stdBinnaclePed = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.16, 0.22, 1.05, 12)), mahoganyMat);
+  stdBinnaclePed.position.set(0, 3.72, 0.95);
+  wheelhouse.add(stdBinnaclePed);
+  const stdBinnacleDome = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.18, 12, 10)), brassMat);
+  stdBinnacleDome.position.set(0, 4.30, 0.95);
+  wheelhouse.add(stdBinnacleDome);
+  for (const px of [-1.55, 1.55]) {
+    const pelorus = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.08, 0.12, 1.0, 10)), brassMat);
+    pelorus.position.set(px, 3.7, -0.1);
+    wheelhouse.add(pelorus);
+  }
 
   for (const bz of [-0.5, 0.55, 1.65]) {
     const beam = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(8.7, 0.12, 0.16)), mahoganyMat);
@@ -2779,7 +3137,50 @@ export function buildTitanicShip(
       engineRoomGroup.add(rod);
       pistonRods.push(rod);
     }
+
+    // Cream-Lagged Overhead Main Steam Receiver Pipe + Brass Flange Collars
+    const steamMain = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.36, 0.36, 23.0, 14)), pipeLaggingMat);
+    steamMain.rotation.x = Math.PI / 2;
+    steamMain.position.set(engX, 7.65, 107.7);
+    engineRoomGroup.add(steamMain);
+    for (let fz = 97.5; fz <= 118.0; fz += 4.1) {
+      const flange = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.44, 0.44, 0.14, 14)), brassMat);
+      flange.rotation.x = Math.PI / 2;
+      flange.position.set(engX, 7.65, fz);
+      engineRoomGroup.add(flange);
+    }
   }
+
+  // Center Parsons Low-Pressure Exhaust Steam Turbine & Central Control Platform
+  const turbineCasing = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(1.55, 1.72, 4.6, 18)), engineGreenMat);
+  turbineCasing.rotation.x = Math.PI / 2;
+  turbineCasing.position.set(0, -1.75, 118.4);
+  engineRoomGroup.add(turbineCasing);
+  const turbinePed = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.4, 1.3, 5.0)), darkIronMat);
+  turbinePed.position.set(0, -2.85, 118.4);
+  engineRoomGroup.add(turbinePed);
+  for (const tz of [116.5, 118.4, 120.3]) {
+    const tBand = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(1.66, 0.06, 8, 22)), brassMat);
+    tBand.position.set(0, -1.75, tz);
+    engineRoomGroup.add(tBand);
+  }
+  const controlStand = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.9, 0.95, 1.1)), darkIronMat);
+  controlStand.position.set(0, -2.92, 105.5);
+  engineRoomGroup.add(controlStand);
+  for (const gx of [-0.5, 0, 0.5]) {
+    const gauge = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.14, 0.08, 12)), brassMat);
+    gauge.rotation.x = Math.PI / 2;
+    gauge.position.set(gx, -2.18, 105.5);
+    engineRoomGroup.add(gauge);
+  }
+  for (const side of [-1, 1]) {
+    for (const lz of [98.5, 105.5, 112.5, 118.5]) {
+      const lamp = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.14, 8, 8)), warmGlowMat);
+      lamp.position.set(side * 8.9, 6.2, lz);
+      engineRoomGroup.add(lamp);
+    }
+  }
+
   const engineLight = new THREE.PointLight(0xffbe66, 5.5, 28, 1.35);
   engineLight.position.set(0, 6.8, 108.0);
   sternContent.add(engineLight);

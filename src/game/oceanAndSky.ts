@@ -14,6 +14,7 @@ export interface OceanUniforms {
   uNightMix: { value: number };
   uCameraPos: { value: THREE.Vector3 };
   uUnderwaterMix: { value: number };
+  uHullDryCutout: { value: THREE.Vector2 };
 }
 
 export interface OceanAndSkyRig {
@@ -35,6 +36,8 @@ export interface OceanAndSkyRig {
     warship2Z?: number,
     warship2HeadingRad?: number,
     warship2SpeedKnots?: number,
+    bowDryMask?: number,
+    sternDryMask?: number,
   ) => void;
   updateCameraView: (camPos: THREE.Vector3, underwaterMix: number) => void;
   dispose: () => void;
@@ -62,6 +65,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     uNightMix: { value: 1 },
     uCameraPos: { value: new THREE.Vector3(0, 15, 0) },
     uUnderwaterMix: { value: 0 },
+    uHullDryCutout: { value: new THREE.Vector2(1, 1) },
   };
 
   const oceanSize = 2300;
@@ -93,6 +97,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     shader.uniforms.uNightMix = uniforms.uNightMix;
     shader.uniforms.uCameraPos = uniforms.uCameraPos;
     shader.uniforms.uUnderwaterMix = uniforms.uUnderwaterMix;
+    shader.uniforms.uHullDryCutout = uniforms.uHullDryCutout;
 
     shader.vertexShader =
       `
@@ -131,6 +136,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       uniform float uNightMix;
       uniform vec3 uCameraPos;
       uniform float uUnderwaterMix;
+      uniform vec2 uHullDryCutout;
       varying vec3 vOceanWorldPos;
       varying float vWaveCrest;
       ` + shader.fragmentShader;
@@ -182,6 +188,26 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
       vec2 right = vec2(-fwd.y, fwd.x);
       float along = dot(rel, fwd);   // +74 is bow tip, -195 is stern
       float side = abs(dot(rel, right));
+
+      // Keep ocean plane clipped outside Titanic's dry watertight hull envelope (until flooded/sunk)
+      float zShip = -along;
+      if (zShip > -72.8 && zShip < 181.5) {
+        float halfB = 14.0;
+        if (zShip < -10.0) {
+          float tB = clamp((zShip + 74.0) / 64.0, 0.0, 1.0);
+          halfB = 14.0 * pow(sin(tB * 1.5707963), 0.78);
+        } else if (zShip > 136.0) {
+          float tS = clamp((195.1 - zShip) / 59.1, 0.0, 1.0);
+          halfB = 14.0 * pow(sin(tS * 1.5707963), 0.65);
+        }
+        // Taper dry cutout cleanly before counter-stern overhang rises clear of the waterline
+        float counterFade = 1.0 - smoothstep(173.0, 181.5, zShip);
+        float dryHalfB = max(0.0, halfB * 0.915 - 0.14) * counterFade;
+        float dryActive = zShip < 90.0 ? uHullDryCutout.x : uHullDryCutout.y;
+        if (side < dryHalfB && dryActive > 0.5) {
+          discard;
+        }
+      }
 
       float speedFactor = clamp(abs(uShipSpeed) / 18.0, 0.0, 1.25);
       float distBehindBow = 73.5 - along;
@@ -578,6 +604,8 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     warship2Z = -280,
     warship2HeadingRad = 0,
     warship2SpeedKnots = 0,
+    bowDryMask = 1.0,
+    sternDryMask = 1.0,
   ) => {
     const clampedNight = THREE.MathUtils.clamp(nightMix, 0, 1);
     uniforms.uTime.value = time;
@@ -591,6 +619,7 @@ export function createOceanAndSky(isSoftwareGl: boolean): OceanAndSkyRig {
     uniforms.uWarship2Forward.value.set(Math.sin(warship2HeadingRad), -Math.cos(warship2HeadingRad));
     uniforms.uWarship2Speed.value = warship2SpeedKnots;
     uniforms.uNightMix.value = clampedNight;
+    uniforms.uHullDryCutout.value.set(bowDryMask, sternDryMask);
 
     skyMat.uniforms.uNightMix.value = clampedNight;
     // Sweep sun across the western Atlantic sky from midday high-arc down below the horizon

@@ -2053,6 +2053,16 @@ export function createCrewAndLifeboats(
   const davitGeoPort = makeWelinDavitGeo(-1);
   const davitGeoStbd = makeWelinDavitGeo(1);
 
+  const davitRackGeo = trackGeo(new THREE.BoxGeometry(0.95, 0.22, 0.24));
+  const davitSectorShape = new THREE.Shape();
+  davitSectorShape.moveTo(-0.34, 0);
+  davitSectorShape.lineTo(0.34, 0);
+  davitSectorShape.lineTo(0.18, 0.56);
+  davitSectorShape.lineTo(-0.18, 0.56);
+  davitSectorShape.closePath();
+  const davitSectorGeo = trackGeo(new THREE.ExtrudeGeometry(davitSectorShape, { depth: 0.14, bevelEnabled: false }));
+  davitSectorGeo.translate(0, 0, -0.07);
+
   const ropeGeo = trackGeo(new THREE.CylinderGeometry(0.026, 0.026, 1.0, 6));
   const lanternGeo = trackGeo(new THREE.SphereGeometry(0.13, 8, 8));
 
@@ -2064,8 +2074,15 @@ export function createCrewAndLifeboats(
       const homeParent = bz < breakZ ? bowContent : sternContent;
 
       const makeDavitArm = (dz: number) => {
+        const rack = new THREE.Mesh(davitRackGeo, officerNavyMat);
+        rack.position.set(side * 12.28, 12.92, bz + dz);
+        homeParent.add(rack);
+
         const arm = new THREE.Group();
         arm.position.set(side * 12.15, 12.84, bz + dz);
+        const sector = new THREE.Mesh(davitSectorGeo, whitePaintMat);
+        sector.position.y = 0.08;
+        arm.add(sector);
         const swanNeck = new THREE.Mesh(side < 0 ? davitGeoPort : davitGeoStbd, whitePaintMat);
         swanNeck.castShadow = true;
         arm.add(swanNeck);

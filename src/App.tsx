@@ -3,7 +3,12 @@ import { EndModal } from './components/EndModal';
 import { GameHUD } from './components/GameHUD';
 import { TitleOverlay } from './components/TitleOverlay';
 import { TitanicEngine } from './game/TitanicEngine';
-import { TARGET_VOYAGE_NM, TelemetrySnapshot } from './game/types';
+import {
+  DEFAULT_TELEGRAPH_INDEX,
+  TARGET_VOYAGE_NM,
+  TELEGRAPH_NOTCHES,
+  TelemetrySnapshot,
+} from './game/types';
 
 const INITIAL_TELEMETRY: TelemetrySnapshot = {
   phase: 'title',
@@ -13,8 +18,8 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   focusSpotCategory: 'exterior',
   headingDeg: 0,
   rudderDeg: 0,
-  speedKnots: 0,
-  telegraphIndex: 1,
+  speedKnots: TELEGRAPH_NOTCHES[DEFAULT_TELEGRAPH_INDEX].targetKnots,
+  telegraphIndex: DEFAULT_TELEGRAPH_INDEX,
   distanceNm: 0,
   targetDistanceNm: TARGET_VOYAGE_NM,
   hullIntegrity: 100,

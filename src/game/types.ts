@@ -212,8 +212,8 @@ export const TELEGRAPH_NOTCHES: TelegraphSpec[] = [
   { id: 'STOP', label: 'ALL STOP', shortLabel: 'STOP', targetKnots: 0, leverAngle: -0.68 },
   { id: 'SLOW', label: 'SLOW AHEAD', shortLabel: 'SLOW', targetKnots: 8, leverAngle: -0.22 },
   { id: 'HALF', label: 'HALF AHEAD', shortLabel: 'HALF', targetKnots: 14, leverAngle: 0.25 },
-  { id: 'FULL', label: 'FULL AHEAD', shortLabel: 'FULL', targetKnots: 20, leverAngle: 0.72 },
-  { id: 'FLANK', label: 'FLANK SPEED', shortLabel: 'FLANK', targetKnots: 24, leverAngle: 1.18 },
+  { id: 'FULL', label: 'FULL AHEAD', shortLabel: 'FULL', targetKnots: 22, leverAngle: 0.72 },
+  { id: 'FLANK', label: 'FLANK SPEED', shortLabel: 'FLANK', targetKnots: 30, leverAngle: 1.18 },
 ];
 
 export type IcebergVariant = 'growler' | 'tabular' | 'pinnacle';
@@ -269,4 +269,5 @@ export interface TelemetrySnapshot {
   isMuted: boolean;
 }
 
-export const TARGET_VOYAGE_NM = 10.0;
+export const DEFAULT_TELEGRAPH_INDEX = 4;
+export const TARGET_VOYAGE_NM = 3.0;
