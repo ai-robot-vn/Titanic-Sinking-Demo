@@ -655,6 +655,47 @@ export class SoundEngine {
     noise.start(now);
   }
 
+  public playWeaponFire(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // Sharp metallic breech snap & muzzle crack
+    const osc = this.ctx.createOscillator();
+    const oscGain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(340, now);
+    osc.frequency.exponentialRampToValueAtTime(52, now + 0.14);
+    oscGain.gain.setValueAtTime(0.24, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(oscGain);
+    oscGain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.18);
+
+    const dur = 0.34;
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.055));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'bandpass';
+    hp.frequency.setValueAtTime(1650, now);
+    hp.frequency.exponentialRampToValueAtTime(280, now + dur);
+    hp.Q.value = 0.85;
+
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(0.32, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    noise.connect(hp);
+    hp.connect(nGain);
+    nGain.connect(this.masterGain);
+    noise.start(now);
+  }
+
   public dispose(): void {
     try {
       this.engineOsc1?.stop();

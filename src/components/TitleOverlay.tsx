@@ -112,7 +112,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
       {/* Control Hint Bar */}
       <div className="flex justify-center">
         <div className="apple-glass-panel px-5 py-2 rounded-2xl text-xs tracking-[0.1em] uppercase text-slate-200/90 text-center">
-          H Hide/Show Panels &nbsp;·&nbsp; A Autopilot &nbsp;·&nbsp; ← / → Steer Helm &nbsp;·&nbsp; W / X Telegraph &nbsp;·&nbsp; I / J / K / L Walk Decks &nbsp;·&nbsp; S Switch Deck
+          W/A/S/D Walk Ship &nbsp;·&nbsp; S+H Draw Weapon &nbsp;·&nbsp; Mouse Fire &nbsp;·&nbsp; T Autopilot &nbsp;·&nbsp; ← / → Steer Helm &nbsp;·&nbsp; Z / X Telegraph &nbsp;·&nbsp; V Switch Deck &nbsp;·&nbsp; H Panels
         </div>
       </div>
     </div>

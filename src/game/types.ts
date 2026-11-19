@@ -265,6 +265,7 @@ export interface TelemetrySnapshot {
   lastEventText: string | null;
   autopilotEnabled: boolean;
   bowPanicActive: boolean;
+  weaponDrawn: boolean;
   endlessMode: boolean;
   isMuted: boolean;
 }

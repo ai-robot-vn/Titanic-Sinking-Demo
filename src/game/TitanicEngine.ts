@@ -38,6 +38,10 @@ const _vFocusLocal = new THREE.Vector3();
 const _vFocusWorld = new THREE.Vector3();
 const _projDummy = new THREE.Object3D();
 const _projColor = new THREE.Color();
+const _weaponRaycaster = new THREE.Raycaster();
+const _weaponNdc = new THREE.Vector2();
+const _muzzleWorld = new THREE.Vector3();
+const _hitTargetWorld = new THREE.Vector3();
 
 type SubmarineState = 'hidden' | 'hunting' | 'sinking' | 'sunk';
 
@@ -225,6 +229,21 @@ export class TitanicEngine {
   private isPointerDown = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
+  private pointerDragDist = 0;
+
+  // On-foot walking & S+H drawn weapon rig
+  private weaponDrawn = false;
+  private weaponDrawMix = 0;
+  private weaponRecoil = 0;
+  private weaponFlashTimer = 0;
+  private weaponFireCooldown = 0;
+  private walkBobPhase = 0;
+  private isWalkingOnFoot = false;
+  private weaponChordLock = false;
+  private readonly weaponRig: THREE.Group;
+  private readonly weaponMuzzleFlash: THREE.Mesh;
+  private readonly weaponGeos: THREE.BufferGeometry[] = [];
+  private readonly weaponMats: THREE.Material[] = [];
 
   // Dynamic Harbor-to-Atlantic Night Progression & Collision Cooldowns
   private nightMix = 0;
@@ -397,6 +416,14 @@ export class TitanicEngine {
 
     const aspect = (container.clientWidth || window.innerWidth) / (container.clientHeight || window.innerHeight);
     this.camera = new THREE.PerspectiveCamera(62, aspect, 0.15, 1800);
+    this.scene.add(this.camera);
+
+    // First-person 1912 Naval Revolver Viewmodel attached to camera
+    const { rig: wRig, flash: wFlash } = this.createPlayerWeaponRig();
+    this.weaponRig = wRig;
+    this.weaponMuzzleFlash = wFlash;
+    this.weaponRig.visible = false;
+    this.camera.add(this.weaponRig);
 
     // 4. Mandatory Procedural Studio Environment Reflection
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -771,6 +798,13 @@ export class TitanicEngine {
     this.autopilotSpeedCooldown = 0;
     this.bowPanicActive = false;
     this.panicShoutCooldown = 0;
+    this.weaponDrawn = false;
+    this.weaponDrawMix = 0;
+    this.weaponRecoil = 0;
+    this.weaponFlashTimer = 0;
+    this.weaponFireCooldown = 0;
+    this.weaponChordLock = false;
+    this.weaponRig.visible = false;
 
     this.resetShipRigPose();
     this.harbor.resetEscorts();
@@ -805,7 +839,7 @@ export class TitanicEngine {
         0,
         false,
       );
-      this.eventText = 'BERTH 44 DEPARTURE — W / X TELEGRAPH · ← / → HELM · [A] AUTOPILOT';
+      this.eventText = 'BERTH 44 — W/A/S/D WALK SHIP · S+H DRAW WEAPON · ←/→ HELM';
       this.sound.playSteamWhistle();
     }
 
@@ -979,6 +1013,11 @@ export class TitanicEngine {
     this.autopilotSpeedCooldown = 0;
     this.bowPanicActive = false;
     this.panicShoutCooldown = 0;
+    this.weaponDrawn = false;
+    this.weaponDrawMix = 0;
+    this.weaponRecoil = 0;
+    this.weaponFlashTimer = 0;
+    this.weaponRig.visible = false;
     this.harbor.root.visible = true;
     this.harbor.resetEscorts();
     this.applyAtmosphere(0);
@@ -1003,6 +1042,30 @@ export class TitanicEngine {
       this.eventText = 'AUTOPILOT DISENGAGED — MANUAL HELM CONTROL';
     }
     this.eventTimer = 2.6;
+    this.emitTelemetry();
+  }
+
+  public toggleWeaponDrawn(): void {
+    this.sound.unlock();
+    if (this.phase === 'title' || this.phase === 'paused') return;
+    this.weaponDrawn = !this.weaponDrawn;
+    if (this.weaponDrawn) {
+      const spec = VESSEL_SPOTS[this.focusSpotIndex];
+      if (
+        spec.id === 'funnels' ||
+        spec.id === 'crowsNest' ||
+        spec.id === 'warship' ||
+        spec.id === 'submarine'
+      ) {
+        this.focusVesselSpot('lifeboats', false);
+      }
+      this.targetOrbitDistance = 0;
+      this.eventText = 'WEAPON DRAWN — AIM & CLICK MOUSE TO FIRE AT VESSELS [S+H HOLSTER]';
+    } else {
+      this.eventText = 'WEAPON HOLSTERED';
+    }
+    this.eventTimer = 2.8;
+    this.sound.playHelmTick();
     this.emitTelemetry();
   }
 
@@ -1107,10 +1170,22 @@ export class TitanicEngine {
     }
 
     if (this.phase === 'gameover' || this.phase === 'victory' || this.phase === 'aftermath') {
+      this.heldKeys.add(code);
+      if (
+        this.phase === 'aftermath' &&
+        ((code === 'KeyH' && this.heldKeys.has('KeyS')) || (code === 'KeyS' && this.heldKeys.has('KeyH')))
+      ) {
+        if (!this.weaponChordLock) {
+          this.weaponChordLock = true;
+          e.preventDefault();
+          this.toggleWeaponDrawn();
+        }
+        return;
+      }
       if (code === 'Enter') {
         e.preventDefault();
         this.startGame();
-      } else if (code === 'KeyS') {
+      } else if (code === 'KeyV') {
         e.preventDefault();
         this.cycleFocusSpot();
       } else if (code === 'KeyC') {
@@ -1120,7 +1195,16 @@ export class TitanicEngine {
     }
 
     if (this.phase === 'sinking') {
-      if (code === 'KeyS') {
+      this.heldKeys.add(code);
+      if ((code === 'KeyH' && this.heldKeys.has('KeyS')) || (code === 'KeyS' && this.heldKeys.has('KeyH'))) {
+        if (!this.weaponChordLock) {
+          this.weaponChordLock = true;
+          e.preventDefault();
+          this.toggleWeaponDrawn();
+        }
+        return;
+      }
+      if (code === 'KeyV') {
         e.preventDefault();
         this.cycleFocusSpot();
       } else if (code === 'KeyC') {
@@ -1136,16 +1220,26 @@ export class TitanicEngine {
 
     this.heldKeys.add(code);
 
-    if (code === 'KeyW' || code === 'ArrowUp') {
+    // S + H simultaneous chord draws / holsters player weapon
+    if ((code === 'KeyH' && this.heldKeys.has('KeyS')) || (code === 'KeyS' && this.heldKeys.has('KeyH'))) {
+      if (!this.weaponChordLock) {
+        this.weaponChordLock = true;
+        e.preventDefault();
+        this.toggleWeaponDrawn();
+      }
+      return;
+    }
+
+    if (code === 'KeyZ' || code === 'ArrowUp') {
       e.preventDefault();
       this.stepTelegraph(1);
     } else if (code === 'KeyX' || code === 'ArrowDown') {
       e.preventDefault();
       this.stepTelegraph(-1);
-    } else if (code === 'KeyA') {
+    } else if (code === 'KeyT') {
       e.preventDefault();
       this.toggleAutopilot();
-    } else if (code === 'KeyS') {
+    } else if (code === 'KeyV') {
       e.preventDefault();
       this.cycleFocusSpot();
     } else if (code === 'Space') {
@@ -1158,10 +1252,14 @@ export class TitanicEngine {
 
   private readonly handleKeyUp = (e: KeyboardEvent) => {
     this.heldKeys.delete(e.code);
+    if (!this.heldKeys.has('KeyS') || !this.heldKeys.has('KeyH')) {
+      this.weaponChordLock = false;
+    }
   };
 
   private readonly handleBlur = () => {
     this.heldKeys.clear();
+    this.weaponChordLock = false;
     this.isPointerDown = false;
   };
 
@@ -1171,12 +1269,14 @@ export class TitanicEngine {
     this.isPointerDown = true;
     this.lastPointerX = e.clientX;
     this.lastPointerY = e.clientY;
+    this.pointerDragDist = 0;
   };
 
   private readonly handlePointerMove = (e: PointerEvent) => {
     if (!this.isPointerDown || this.phase === 'title' || this.phase === 'paused') return;
     const dx = e.clientX - this.lastPointerX;
     const dy = e.clientY - this.lastPointerY;
+    this.pointerDragDist += Math.hypot(dx, dy);
     this.lastPointerX = e.clientX;
     this.lastPointerY = e.clientY;
     this.targetOrbitYaw -= dx * 0.0062;
@@ -1190,8 +1290,22 @@ export class TitanicEngine {
     }
   };
 
-  private readonly handlePointerUp = () => {
+  private readonly handlePointerUp = (e: PointerEvent) => {
+    const wasClick = this.isPointerDown && e.button === 0 && this.pointerDragDist < 8;
     this.isPointerDown = false;
+    if (
+      wasClick &&
+      this.weaponDrawn &&
+      (this.phase === 'playing' || this.phase === 'sinking' || this.phase === 'aftermath')
+    ) {
+      this.firePlayerWeaponAtScreenPos(e.clientX, e.clientY);
+    }
+  };
+
+  private readonly handleContextMenu = (e: MouseEvent) => {
+    if (this.weaponDrawn) {
+      e.preventDefault();
+    }
   };
 
   private readonly handleWheel = (e: WheelEvent) => {
@@ -1225,6 +1339,7 @@ export class TitanicEngine {
     window.addEventListener('resize', this.handleResize);
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', this.handlePointerDown);
+    canvas.addEventListener('contextmenu', this.handleContextMenu);
     canvas.addEventListener('wheel', this.handleWheel, { passive: false });
     window.addEventListener('pointermove', this.handlePointerMove);
     window.addEventListener('pointerup', this.handlePointerUp);
@@ -1237,6 +1352,7 @@ export class TitanicEngine {
     window.removeEventListener('resize', this.handleResize);
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.handlePointerDown);
+    canvas.removeEventListener('contextmenu', this.handleContextMenu);
     canvas.removeEventListener('wheel', this.handleWheel);
     window.removeEventListener('pointermove', this.handlePointerMove);
     window.removeEventListener('pointerup', this.handlePointerUp);
@@ -1418,8 +1534,7 @@ export class TitanicEngine {
       this.rudderDeg = THREE.MathUtils.damp(this.rudderDeg, this.autopilotTargetRudder, 5.2, dt);
     } else {
       const steerLeft = this.heldKeys.has('ArrowLeft') || this.heldKeys.has('KeyQ');
-      const steerRight =
-        this.heldKeys.has('ArrowRight') || this.heldKeys.has('KeyE') || this.heldKeys.has('KeyD');
+      const steerRight = this.heldKeys.has('ArrowRight') || this.heldKeys.has('KeyE');
 
       if (steerLeft && !steerRight) {
         this.manualRudderTarget = null;
@@ -1869,13 +1984,49 @@ export class TitanicEngine {
     }
   }
 
-  private stepInteriorWalk(dt: number): void {
-    const spec = VESSEL_SPOTS[this.focusSpotIndex];
-    if (!spec.walkBounds) return;
+  private getExteriorDeckEyeY(localZ: number): number {
+    if (localZ < -35.0) return 11.25; // Forecastle Bow
+    if (localZ < -9.5) return 8.45; // Forward Well Deck
+    if (localZ <= 136.0) return 14.62; // Bridge Wings & Boat Deck Promenade
+    if (localZ <= 169.5) return 8.45; // Aft Well Deck
+    return 10.45; // Poop & Cruiser Stern Deck
+  }
 
-    const walkFwd = (this.heldKeys.has('KeyI') ? 1 : 0) - (this.heldKeys.has('KeyK') ? 1 : 0);
-    const walkStrafe = (this.heldKeys.has('KeyL') ? 1 : 0) - (this.heldKeys.has('KeyJ') ? 1 : 0);
-    if (walkFwd === 0 && walkStrafe === 0) return;
+  private getExteriorDeckHalfBeam(localZ: number): number {
+    if (localZ < -35.0) {
+      return THREE.MathUtils.clamp(((localZ + 73.0) / 38.0) * 11.8, 1.8, 11.8);
+    }
+    if (localZ > 169.5) {
+      return THREE.MathUtils.clamp(((194.0 - localZ) / 24.5) * 10.5, 2.2, 10.5);
+    }
+    return 13.4;
+  }
+
+  private stepInteriorWalk(dt: number): void {
+    const walkFwd =
+      (this.heldKeys.has('KeyW') || this.heldKeys.has('KeyI') ? 1 : 0) -
+      (this.heldKeys.has('KeyS') || this.heldKeys.has('KeyK') ? 1 : 0);
+    const walkStrafe =
+      (this.heldKeys.has('KeyD') || this.heldKeys.has('KeyL') ? 1 : 0) -
+      (this.heldKeys.has('KeyA') || this.heldKeys.has('KeyJ') ? 1 : 0);
+
+    this.isWalkingOnFoot = walkFwd !== 0 || walkStrafe !== 0;
+    if (!this.isWalkingOnFoot) return;
+
+    let spec = VESSEL_SPOTS[this.focusSpotIndex];
+    if (
+      spec.id === 'funnels' ||
+      spec.id === 'crowsNest' ||
+      spec.id === 'warship' ||
+      spec.id === 'submarine'
+    ) {
+      this.focusVesselSpot('lifeboats', false);
+      spec = VESSEL_SPOTS[this.focusSpotIndex];
+    }
+
+    if (this.targetOrbitDistance > 1.5) {
+      this.targetOrbitDistance = 0;
+    }
 
     // Walk relative to horizontal camera look direction in ship-local XZ plane
     const lookLocalX = -Math.sin(this.orbitYaw);
@@ -1883,7 +2034,7 @@ export class TitanicEngine {
     const rightLocalX = Math.cos(this.orbitYaw);
     const rightLocalZ = -Math.sin(this.orbitYaw);
 
-    const moveSpeed = 5.4;
+    const moveSpeed = 7.4;
     let vx = lookLocalX * walkFwd + rightLocalX * walkStrafe;
     let vz = lookLocalZ * walkFwd + rightLocalZ * walkStrafe;
     const len = Math.hypot(vx, vz) || 1;
@@ -1893,12 +2044,27 @@ export class TitanicEngine {
     this.interiorWalkOffset.x += vx * moveSpeed * dt;
     this.interiorWalkOffset.z += vz * moveSpeed * dt;
 
-    const minOffX = spec.walkBounds.minX - spec.localTarget[0];
-    const maxOffX = spec.walkBounds.maxX - spec.localTarget[0];
-    const minOffZ = spec.walkBounds.minZ - spec.localTarget[2];
-    const maxOffZ = spec.walkBounds.maxZ - spec.localTarget[2];
-    this.interiorWalkOffset.x = THREE.MathUtils.clamp(this.interiorWalkOffset.x, minOffX, maxOffX);
-    this.interiorWalkOffset.z = THREE.MathUtils.clamp(this.interiorWalkOffset.z, minOffZ, maxOffZ);
+    if (spec.category === 'interior' && spec.walkBounds) {
+      const minOffX = spec.walkBounds.minX - spec.localTarget[0];
+      const maxOffX = spec.walkBounds.maxX - spec.localTarget[0];
+      const minOffZ = spec.walkBounds.minZ - spec.localTarget[2];
+      const maxOffZ = spec.walkBounds.maxZ - spec.localTarget[2];
+      this.interiorWalkOffset.x = THREE.MathUtils.clamp(this.interiorWalkOffset.x, minOffX, maxOffX);
+      this.interiorWalkOffset.z = THREE.MathUtils.clamp(this.interiorWalkOffset.z, minOffZ, maxOffZ);
+      this.interiorWalkOffset.y = 0;
+    } else {
+      // Unrestricted full-ship on-foot exterior walking from bow forecastle (-69m) to cruiser stern (+190m)
+      const worldLocalZ = THREE.MathUtils.clamp(spec.localTarget[2] + this.interiorWalkOffset.z, -69.0, 190.5);
+      const halfBeam = this.getExteriorDeckHalfBeam(worldLocalZ);
+      const worldLocalX = THREE.MathUtils.clamp(
+        spec.localTarget[0] + this.interiorWalkOffset.x,
+        -halfBeam,
+        halfBeam,
+      );
+      this.interiorWalkOffset.x = worldLocalX - spec.localTarget[0];
+      this.interiorWalkOffset.z = worldLocalZ - spec.localTarget[2];
+      this.interiorWalkOffset.y = this.getExteriorDeckEyeY(worldLocalZ) - spec.localTarget[1];
+    }
   }
 
   private syncUnderwaterCameraEffects(nightMix: number, dt: number): void {
@@ -2160,6 +2326,7 @@ export class TitanicEngine {
       this.focusVesselSpot('funnels', false);
     }
 
+    this.stepInteriorWalk(dt);
     this.stepNavalCombat(dt, 1.0, 'titanic');
     this.checkAuxVesselCollisions(dt);
     this.stepWarshipConsciousness(dt, 1.0, true);
@@ -4701,6 +4868,412 @@ export class TitanicEngine {
     // Subtle ship roll feel when standing inside wheelhouse or interior decks
     const rollInfluence = isInterior ? 0.55 : 0.08;
     this.camera.rotation.z += this.rollAngle * rollInfluence;
+
+    this.updateWeaponViewmodel(dt);
+  }
+
+  private createPlayerWeaponRig(): { rig: THREE.Group; flash: THREE.Mesh } {
+    const rig = new THREE.Group();
+
+    const bluedSteel = new THREE.MeshStandardMaterial({
+      color: 0x263140,
+      metalness: 0.86,
+      roughness: 0.26,
+    });
+    const walnutGrip = new THREE.MeshStandardMaterial({
+      color: 0x5c3317,
+      metalness: 0.06,
+      roughness: 0.58,
+    });
+    const brassTrim = new THREE.MeshStandardMaterial({
+      color: 0xd4a64a,
+      metalness: 0.82,
+      roughness: 0.24,
+    });
+    const flashMat = new THREE.MeshBasicMaterial({
+      color: 0xffd880,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    });
+    this.weaponMats.push(bluedSteel, walnutGrip, brassTrim, flashMat);
+
+    const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+      this.weaponGeos.push(g);
+      return g;
+    };
+
+    // Frame & Receiver
+    const frame = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.054, 0.15)), bluedSteel);
+    frame.position.set(0, -0.008, -0.02);
+    rig.add(frame);
+
+    // Fluted Cylinder
+    const cylGeo = trackGeo(new THREE.CylinderGeometry(0.024, 0.024, 0.056, 12));
+    cylGeo.rotateX(Math.PI / 2);
+    const cylinder = new THREE.Mesh(cylGeo, bluedSteel);
+    cylinder.position.set(0, 0.006, -0.018);
+    rig.add(cylinder);
+
+    // Heavy Octagonal Barrel & Top Rib
+    const barrel = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.022, 0.028, 0.19)), bluedSteel);
+    barrel.position.set(0, 0.018, -0.145);
+    rig.add(barrel);
+
+    const topRib = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.012, 0.01, 0.185)), brassTrim);
+    topRib.position.set(0, 0.034, -0.142);
+    rig.add(topRib);
+
+    const frontSight = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.005, 0.014, 0.014)), brassTrim);
+    frontSight.position.set(0, 0.044, -0.228);
+    rig.add(frontSight);
+
+    // Hammer Spur & Trigger Guard
+    const hammer = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.009, 0.024, 0.018)), bluedSteel);
+    hammer.position.set(0, 0.028, 0.046);
+    hammer.rotation.x = -0.35;
+    rig.add(hammer);
+
+    const guardGeo = trackGeo(new THREE.TorusGeometry(0.018, 0.004, 6, 14));
+    guardGeo.rotateY(Math.PI / 2);
+    const guard = new THREE.Mesh(guardGeo, brassTrim);
+    guard.position.set(0, -0.036, 0.002);
+    rig.add(guard);
+
+    // Angled Walnut Grip
+    const grip = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.032, 0.105, 0.044)), walnutGrip);
+    grip.position.set(0, -0.068, 0.048);
+    grip.rotation.x = 0.28;
+    rig.add(grip);
+
+    // Muzzle Flash Burst
+    const flashGeo = trackGeo(new THREE.OctahedronGeometry(0.045, 0));
+    flashGeo.scale(1.0, 1.0, 2.2);
+    const flash = new THREE.Mesh(flashGeo, flashMat);
+    flash.position.set(0, 0.018, -0.275);
+    flash.visible = false;
+    rig.add(flash);
+
+    rig.position.set(0.24, -0.22, -0.44);
+    return { rig, flash };
+  }
+
+  private updateWeaponViewmodel(dt: number): void {
+    if (this.weaponFireCooldown > 0) {
+      this.weaponFireCooldown = Math.max(0, this.weaponFireCooldown - dt);
+    }
+    if (this.weaponFlashTimer > 0) {
+      this.weaponFlashTimer = Math.max(0, this.weaponFlashTimer - dt);
+    }
+    this.weaponRecoil = THREE.MathUtils.damp(this.weaponRecoil, 0, 14, Math.max(dt, 0.016));
+
+    const targetMix = this.weaponDrawn && this.orbitDistance < 4.0 ? 1 : 0;
+    this.weaponDrawMix = THREE.MathUtils.damp(this.weaponDrawMix, targetMix, 12, Math.max(dt, 0.016));
+
+    if (this.weaponDrawMix < 0.02 && targetMix === 0) {
+      this.weaponRig.visible = false;
+      return;
+    }
+
+    this.weaponRig.visible = true;
+    this.weaponMuzzleFlash.visible = this.weaponFlashTimer > 0;
+    if (this.weaponMuzzleFlash.visible) {
+      this.weaponMuzzleFlash.rotation.z = Math.random() * Math.PI;
+    }
+
+    if (this.isWalkingOnFoot && dt > 0) {
+      this.walkBobPhase += dt * 10.5;
+    }
+    const bobX = this.isWalkingOnFoot ? Math.cos(this.walkBobPhase) * 0.009 : Math.sin(this.simTime * 1.4) * 0.002;
+    const bobY = this.isWalkingOnFoot ? Math.abs(Math.sin(this.walkBobPhase)) * 0.012 : Math.cos(this.simTime * 1.8) * 0.002;
+
+    const holsterDrop = (1 - this.weaponDrawMix) * 0.28;
+    const recoilBack = this.weaponRecoil * 0.065;
+    const recoilUp = this.weaponRecoil * 0.025;
+
+    this.weaponRig.position.set(
+      0.23 + bobX,
+      -0.205 - holsterDrop - bobY + recoilUp,
+      -0.42 + recoilBack,
+    );
+    this.weaponRig.rotation.set(
+      this.weaponRecoil * 0.34 - (1 - this.weaponDrawMix) * 0.75,
+      0.03,
+      -0.02,
+    );
+  }
+
+  private raySphereHitDist(
+    ox: number,
+    oy: number,
+    oz: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    cx: number,
+    cy: number,
+    cz: number,
+    radius: number,
+  ): number | null {
+    const ocX = cx - ox;
+    const ocY = cy - oy;
+    const ocZ = cz - oz;
+    const tca = ocX * dx + ocY * dy + ocZ * dz;
+    if (tca < 0) return null;
+    const d2 = ocX * ocX + ocY * ocY + ocZ * ocZ - tca * tca;
+    const r2 = radius * radius;
+    if (d2 > r2) return null;
+    const thc = Math.sqrt(r2 - d2);
+    return Math.max(0.2, tca - thc);
+  }
+
+  private firePlayerWeaponAtScreenPos(clientX: number, clientY: number): void {
+    if (this.weaponFireCooldown > 0) return;
+    this.weaponFireCooldown = 0.18;
+    this.weaponRecoil = 1.0;
+    this.weaponFlashTimer = 0.075;
+    this.sound.playWeaponFire();
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    _weaponNdc.set(
+      ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
+      -((clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1,
+    );
+    _weaponRaycaster.setFromCamera(_weaponNdc, this.camera);
+
+    const ox = _weaponRaycaster.ray.origin.x;
+    const oy = _weaponRaycaster.ray.origin.y;
+    const oz = _weaponRaycaster.ray.origin.z;
+    const dx = _weaponRaycaster.ray.direction.x;
+    const dy = _weaponRaycaster.ray.direction.y;
+    const dz = _weaponRaycaster.ray.direction.z;
+
+    let bestT = Infinity;
+    let hitType: 'none' | 'submarine' | 'warship1' | 'warship2' | 'carpathia' | 'harbor' | 'iceberg' = 'none';
+    let hitSub: SubmarineEntity | null = null;
+    let hitHarborObsId = '';
+    let hitHarborLabel = '';
+    let hitSide = 1;
+
+    // 1. Check all surfaced submarines
+    for (let si = 0; si < this.submarines.length; si++) {
+      const sub = this.submarines[si];
+      if (sub.state !== 'hunting' || sub.diveY < -3.5) continue;
+      const sFwdX = Math.sin(sub.headingRad);
+      const sFwdZ = -Math.cos(sub.headingRad);
+      const sRightX = Math.cos(sub.headingRad);
+      const sRightZ = Math.sin(sub.headingRad);
+      const pts: Array<{ zOff: number; yOff: number; r: number }> = [
+        { zOff: -20, yOff: 1.8, r: 8.2 },
+        { zOff: 0, yOff: 3.4, r: 9.2 },
+        { zOff: 20, yOff: 1.8, r: 8.2 },
+      ];
+      for (const pt of pts) {
+        const px = sub.x + sFwdX * -pt.zOff;
+        const py = sub.diveY + pt.yOff;
+        const pz = sub.z + sFwdZ * -pt.zOff;
+        const t = this.raySphereHitDist(ox, oy, oz, dx, dy, dz, px, py, pz, pt.r);
+        if (t !== null && t < bestT) {
+          bestT = t;
+          hitType = 'submarine';
+          hitSub = sub;
+          hitSide = (ox - sub.x) * sRightX + (oz - sub.z) * sRightZ >= 0 ? 1 : -1;
+        }
+      }
+    }
+
+    // 2. Check Royal Navy Escort Warships
+    const warships = [
+      {
+        kind: 'warship1' as const,
+        st: this.warship1State,
+        x: this.warshipX,
+        z: this.warshipZ,
+        h: this.warshipHeadingRad,
+      },
+      {
+        kind: 'warship2' as const,
+        st: this.warship2State,
+        x: this.warship2X,
+        z: this.warship2Z,
+        h: this.warship2HeadingRad,
+      },
+    ];
+    for (const w of warships) {
+      if (w.st.status !== 'intact') continue;
+      const wFwdX = Math.sin(w.h);
+      const wFwdZ = -Math.cos(w.h);
+      const wRightX = Math.cos(w.h);
+      const wRightZ = Math.sin(w.h);
+      for (const pt of WARSHIP_HULL_POINTS) {
+        const px = w.x + wFwdX * -pt.zLocal;
+        const pz = w.z + wFwdZ * -pt.zLocal;
+        for (const yLvl of [5.5, 11.5]) {
+          const t = this.raySphereHitDist(ox, oy, oz, dx, dy, dz, px, yLvl, pz, pt.radius * 1.15);
+          if (t !== null && t < bestT) {
+            bestT = t;
+            hitType = w.kind;
+            hitSide = (ox - w.x) * wRightX + (oz - w.z) * wRightZ >= 0 ? 1 : -1;
+          }
+        }
+      }
+    }
+
+    // 3. Check RMS Carpathia
+    if (this.carpathia.root.visible && this.carpathiaState.status === 'intact') {
+      const ch = this.carpathia.root.rotation.y * -1;
+      const cFwdX = Math.sin(ch);
+      const cFwdZ = -Math.cos(ch);
+      const cRightX = Math.cos(ch);
+      const cRightZ = Math.sin(ch);
+      for (const pt of CARPATHIA_HULL_POINTS) {
+        const px = this.carpathia.root.position.x + cFwdX * -pt.zLocal;
+        const pz = this.carpathia.root.position.z + cFwdZ * -pt.zLocal;
+        const t = this.raySphereHitDist(ox, oy, oz, dx, dy, dz, px, 7.5, pz, pt.radius * 1.25);
+        if (t !== null && t < bestT) {
+          bestT = t;
+          hitType = 'carpathia';
+          hitSide = (ox - this.carpathia.root.position.x) * cRightX + (oz - this.carpathia.root.position.z) * cRightZ >= 0 ? 1 : -1;
+        }
+      }
+    }
+
+    // 4. Check Harbor Vessels (Tugs, Pilot Vessel, Harbor Lifeboats)
+    if (this.harbor.root.visible) {
+      const circleObs = this.harbor.getCircleObstacles();
+      for (let i = 0; i < circleObs.length; i++) {
+        const obs = circleObs[i];
+        if (!obs.active) continue;
+        if (obs.kind !== 'tug' && obs.kind !== 'pilot' && obs.kind !== 'lifeboat') continue;
+        const t = this.raySphereHitDist(
+          ox,
+          oy,
+          oz,
+          dx,
+          dy,
+          dz,
+          obs.x,
+          3.2,
+          obs.z,
+          Math.max(7.5, obs.radius * 1.25),
+        );
+        if (t !== null && t < bestT) {
+          bestT = t;
+          hitType = 'harbor';
+          hitHarborObsId = obs.id;
+          hitHarborLabel = obs.label;
+        }
+      }
+    }
+
+    // 5. Check Iceberg
+    for (let i = 0; i < this.icebergs.length; i++) {
+      const b = this.icebergs[i];
+      const t = this.raySphereHitDist(ox, oy, oz, dx, dy, dz, b.x, 8.0, b.z, b.collisionRadius * 1.05);
+      if (t !== null && t < bestT) {
+        bestT = t;
+        hitType = 'iceberg';
+      }
+    }
+
+    // Ocean plane intersection fallback for splashes
+    let travelDist = bestT < Infinity ? bestT : 520;
+    if (hitType === 'none' && dy < -0.002) {
+      const tWater = -oy / dy;
+      if (tWater > 1 && tWater < 720) {
+        travelDist = tWater;
+        const wx = ox + dx * tWater;
+        const wz = oz + dz * tWater;
+        for (let k = 0; k < 12; k++) {
+          this.particles.emit(
+            wx + (Math.random() - 0.5) * 1.2,
+            0.35,
+            wz + (Math.random() - 0.5) * 1.2,
+            (Math.random() - 0.5) * 3.5,
+            3.5 + Math.random() * 5.0,
+            (Math.random() - 0.5) * 3.5,
+            0.55 + Math.random() * 0.5,
+            0.6,
+            9.8,
+            0xe0f2fe,
+          );
+        }
+      }
+    }
+
+    // Visual tracer streak from muzzle toward hit location
+    this.weaponMuzzleFlash.getWorldPosition(_muzzleWorld);
+    _hitTargetWorld.set(ox + dx * travelDist, oy + dy * travelDist, oz + dz * travelDist);
+    const tracerSteps = 6;
+    for (let s = 1; s <= tracerSteps; s++) {
+      const f = s / tracerSteps;
+      this.particles.emit(
+        THREE.MathUtils.lerp(_muzzleWorld.x, _hitTargetWorld.x, f * 0.45),
+        THREE.MathUtils.lerp(_muzzleWorld.y, _hitTargetWorld.y, f * 0.45),
+        THREE.MathUtils.lerp(_muzzleWorld.z, _hitTargetWorld.z, f * 0.45),
+        dx * 90,
+        dy * 90,
+        dz * 90,
+        0.24,
+        0.22,
+        0,
+        0xffe49c,
+      );
+    }
+
+    const hitX = _hitTargetWorld.x;
+    const hitY = Math.max(0.8, _hitTargetWorld.y);
+    const hitZ = _hitTargetWorld.z;
+
+    if (hitType === 'submarine' && hitSub) {
+      hitSub.hp -= 2;
+      hitSub.hitFireIntensity = 1.0;
+      const lethal = hitSub.hp <= 0;
+      for (let k = 0; k < (lethal ? 36 : 20); k++) {
+        this.particles.emit(
+          hitX + (Math.random() - 0.5) * 3.2,
+          hitY,
+          hitZ + (Math.random() - 0.5) * 3.2,
+          (Math.random() - 0.5) * 9,
+          4 + Math.random() * 8,
+          (Math.random() - 0.5) * 9,
+          0.75 + Math.random() * 0.9,
+          0.9 + Math.random() * 0.4,
+          9.8,
+          k < 10 ? 0xff7b29 : 0xe0f2fe,
+        );
+      }
+      this.sound.playSubmarineStruck(lethal);
+      if (lethal) {
+        hitSub.state = 'sinking';
+        hitSub.sinkElapsed = 0;
+        this.submarinesSunk += 1;
+        this.score += 500;
+        this.eventText = `DIRECT HIT — ${hitSub.label} SUNK BY PLAYER FIRE! (+500)`;
+      } else {
+        this.score += 120;
+        this.eventText = `HIT ${hitSub.label}! (${Math.max(0, hitSub.hp)}/${hitSub.maxHp} HP)`;
+      }
+      this.eventTimer = 2.8;
+      this.emitTelemetry();
+    } else if (hitType === 'warship1' || hitType === 'warship2') {
+      const st = hitType === 'warship1' ? this.warship1State : this.warship2State;
+      this.damageAuxVessel(st, 35, hitX, hitZ, 'DECK WEAPON FIRE', hitSide);
+      this.emitTelemetry();
+    } else if (hitType === 'carpathia') {
+      this.damageAuxVessel(this.carpathiaState, 38, hitX, hitZ, 'DECK WEAPON FIRE', hitSide);
+      this.emitTelemetry();
+    } else if (hitType === 'harbor' && hitHarborObsId) {
+      this.harbor.triggerEscortStrike(hitHarborObsId);
+      this.processHarborBreakEvents();
+      this.particles.burstIceImpact(hitX, hitY, hitZ, 28);
+      this.sound.playCollisionImpact(0.6);
+      this.eventText = `VESSEL STRUCK BY WEAPON FIRE: ${hitHarborLabel}`;
+      this.eventTimer = 2.6;
+      this.emitTelemetry();
+    } else if (hitType === 'iceberg') {
+      this.particles.burstIceImpact(hitX, hitY, hitZ, 18);
+    }
   }
 
   private saveBestScore(): void {
@@ -4781,6 +5354,7 @@ export class TitanicEngine {
       lastEventText: this.eventText,
       autopilotEnabled: this.autopilotEnabled,
       bowPanicActive: this.bowPanicActive,
+      weaponDrawn: this.weaponDrawn,
       endlessMode: this.endlessMode,
       isMuted: this.sound.isMuted(),
     });
@@ -4798,6 +5372,12 @@ export class TitanicEngine {
     this.warship2.dispose();
     for (const sub of this.submarines) {
       sub.rig.dispose();
+    }
+    for (const g of this.weaponGeos) {
+      g.dispose();
+    }
+    for (const m of this.weaponMats) {
+      m.dispose();
     }
     this.projectileMesh.geometry.dispose();
     (this.projectileMesh.material as THREE.Material).dispose();

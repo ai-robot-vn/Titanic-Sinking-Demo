@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Anchor,
   Camera,
@@ -6,6 +6,7 @@ import {
   ChevronUp,
   Clock,
   Compass,
+  Crosshair,
   Droplets,
   Eye,
   EyeOff,
@@ -31,6 +32,7 @@ interface GameHUDProps {
   onSetRudder: (deg: number | null) => void;
   onToggleAutopilot: () => void;
   onTriggerSearchlight: () => void;
+  onToggleWeapon: () => void;
   onToggleCamera: () => void;
   onFocusSpot: (spotId: VesselSpotId) => void;
   onTogglePause: () => void;
@@ -60,6 +62,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onSetRudder,
   onToggleAutopilot,
   onTriggerSearchlight,
+  onToggleWeapon,
   onToggleCamera,
   onFocusSpot,
   onTogglePause,
@@ -72,15 +75,50 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 }) => {
   const [panelsVisible, setPanelsVisible] = useState(true);
   const [dockCollapsed, setDockCollapsed] = useState(false);
+  const sHeldRef = useRef(false);
+  const hHeldRef = useRef(false);
+  const chordUsedRef = useRef(false);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'KeyH' && !e.repeat) {
-        setPanelsVisible((prev) => !prev);
+      if (e.code === 'KeyS') {
+        sHeldRef.current = true;
+        if (hHeldRef.current) {
+          chordUsedRef.current = true;
+        }
+      } else if (e.code === 'KeyH' && !e.repeat) {
+        hHeldRef.current = true;
+        if (sHeldRef.current) {
+          chordUsedRef.current = true;
+        } else {
+          chordUsedRef.current = false;
+        }
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'KeyS') {
+        sHeldRef.current = false;
+      } else if (e.code === 'KeyH') {
+        if (hHeldRef.current && !chordUsedRef.current && !sHeldRef.current) {
+          setPanelsVisible((prev) => !prev);
+        }
+        hHeldRef.current = false;
+        chordUsedRef.current = false;
+      }
+    };
+    const onBlur = () => {
+      sHeldRef.current = false;
+      hHeldRef.current = false;
+      chordUsedRef.current = false;
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
   }, []);
 
   const isSinking = telemetry.phase === 'sinking';
@@ -101,8 +139,25 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   const floodPct = telemetry.floodingPct;
   const floodColor = floodPct > 75 ? '#ef4444' : '#38bdf8';
 
+  const canUseWeapon =
+    telemetry.phase === 'playing' || isSinking || isAftermath;
+
   return (
     <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-3.5 md:p-5 font-sans-ui">
+      {/* Aim Reticle Overlay when Weapon Drawn */}
+      {telemetry.weaponDrawn && canUseWeapon && (
+        <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-0">
+          <div className="relative w-7 h-7 flex items-center justify-center">
+            <div className="w-5 h-5 rounded-full border border-amber-200/75 shadow-[0_0_8px_rgba(251,191,36,0.4)]" />
+            <div className="absolute w-1 h-1 rounded-full bg-amber-100" />
+            <div className="absolute -top-1.5 w-[1px] h-1.5 bg-amber-200/80" />
+            <div className="absolute -bottom-1.5 w-[1px] h-1.5 bg-amber-200/80" />
+            <div className="absolute -left-1.5 h-[1px] w-1.5 bg-amber-200/80" />
+            <div className="absolute -right-1.5 h-[1px] w-1.5 bg-amber-200/80" />
+          </div>
+        </div>
+      )}
+
       {/* TOP PERIMETER BAR */}
       <div className="flex items-start justify-between gap-3">
         {/* Top-Left: Hull Watertight Compartments, Flooding & Distance */}
@@ -298,7 +353,14 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
               {telemetry.autopilotEnabled && !telemetry.lastEventText && !telemetry.icebergWarning && telemetry.activeSubmarines === 0 && (
                 <div className="apple-glass-panel px-4 py-1.5 rounded-xl text-[11px] font-semibold tracking-[0.14em] uppercase text-emerald-200">
-                  Autopilot Active — Wheelhouse Crew At The Helm [A]
+                  Autopilot Active — Wheelhouse Crew At The Helm [T]
+                </div>
+              )}
+
+              {telemetry.weaponDrawn && !telemetry.lastEventText && !telemetry.icebergWarning && (
+                <div className="apple-glass-panel px-4 py-1.5 rounded-xl text-[11px] font-semibold tracking-[0.12em] uppercase text-amber-200 flex items-center gap-1.5">
+                  <Crosshair className="w-3.5 h-3.5 text-amber-300" />
+                  Webley .455 Drawn · Click To Fire At Submarines Or Vessels · [S+H] Holster
                 </div>
               )}
 
@@ -308,9 +370,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </div>
               )}
 
-              {!telemetry.icebergWarning && !telemetry.lastEventText && !telemetry.autopilotEnabled && !telemetry.bowPanicActive && telemetry.activeSubmarines === 0 && telemetry.focusSpotCategory === 'interior' && (
+              {!telemetry.icebergWarning && !telemetry.lastEventText && !telemetry.autopilotEnabled && !telemetry.weaponDrawn && !telemetry.bowPanicActive && telemetry.activeSubmarines === 0 && telemetry.focusSpotCategory === 'interior' && (
                 <div className="apple-glass-panel px-3.5 py-1.5 rounded-xl text-[10px] font-semibold tracking-[0.12em] uppercase text-amber-200">
-                  {telemetry.focusSpotLabel} · I / J / K / L Walk Deck · Drag Look
+                  {telemetry.focusSpotLabel} · W / A / S / D Walk Deck · Drag Look · S+H Sidearm
                 </div>
               )}
             </>
@@ -401,7 +463,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           <div className="flex flex-col items-center gap-2">
             <div className="pointer-events-auto apple-glass-panel rounded-2xl px-4 py-2.5 flex flex-wrap items-center justify-center gap-1.5 max-w-[95vw]">
               <span className="text-[10px] font-semibold tracking-[0.12em] uppercase text-slate-300/80 mr-1">
-                Focus [S]:
+                Focus [V]:
               </span>
               {VESSEL_SPOTS.map((spot) => {
                 const active = telemetry.focusSpotId === spot.id;
@@ -425,6 +487,18 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <div className="h-4 w-[1px] bg-white/15 mx-1" />
               <button
                 type="button"
+                onClick={onToggleWeapon}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-[10px] font-semibold tracking-[0.1em] uppercase transition-all cursor-pointer whitespace-nowrap ${
+                  telemetry.weaponDrawn
+                    ? 'bg-amber-400/25 border border-amber-300/60 text-amber-100'
+                    : 'apple-glass-subtle hover:bg-white/15 text-amber-100'
+                }`}
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                {telemetry.weaponDrawn ? 'Holster [S+H]' : 'Sidearm [S+H]'}
+              </button>
+              <button
+                type="button"
                 onClick={onSkipSinking}
                 className="apple-glass-subtle hover:bg-white/15 flex items-center gap-1.5 px-3 py-1 rounded-xl text-slate-100 text-[10px] font-semibold tracking-[0.1em] uppercase transition-colors cursor-pointer whitespace-nowrap"
               >
@@ -433,7 +507,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               </button>
             </div>
             <div className="apple-glass-panel text-[10px] tracking-[0.12em] uppercase text-slate-200/85 px-3.5 py-1 rounded-xl">
-              Drag Mouse to Orbit 360° · Scroll Wheel to Zoom · S to Focus Station
+              W/A/S/D Walk Ship · S+H Sidearm · Click Shoot · Drag Look · V Focus Station
             </div>
           </div>
         ) : isAftermath ? (
@@ -504,6 +578,18 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 </button>
               )}
               <div className="h-4 w-[1px] bg-white/15" />
+              <button
+                type="button"
+                onClick={onToggleWeapon}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-semibold tracking-[0.1em] uppercase transition-all cursor-pointer whitespace-nowrap ${
+                  telemetry.weaponDrawn
+                    ? 'bg-amber-400/25 border border-amber-300/60 text-amber-100'
+                    : 'apple-glass-subtle hover:bg-white/15 text-amber-100'
+                }`}
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                {telemetry.weaponDrawn ? 'Holster [S+H]' : 'Sidearm [S+H]'}
+              </button>
               <button
                 type="button"
                 onClick={onOpenReport}
@@ -591,7 +677,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
                   <div className="hidden md:block h-5 w-[1px] bg-white/15" />
 
-                  {/* Autopilot, Searchlight Sweep & Quick Helm/Ship Toggle */}
+                  {/* Autopilot, Weapon, Searchlight Sweep & Quick Helm/Ship Toggle */}
                   <div className="flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
@@ -603,7 +689,20 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                       }`}
                     >
                       <Navigation className="w-3.5 h-3.5" />
-                      {telemetry.autopilotEnabled ? 'Autopilot On [A]' : 'Autopilot [A]'}
+                      {telemetry.autopilotEnabled ? 'Autopilot On [T]' : 'Autopilot [T]'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={onToggleWeapon}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-semibold tracking-[0.1em] uppercase transition-all cursor-pointer whitespace-nowrap ${
+                        telemetry.weaponDrawn
+                          ? 'bg-amber-400/25 border border-amber-300/60 text-amber-100 shadow-sm'
+                          : 'apple-glass-subtle hover:bg-white/15 text-amber-100'
+                      }`}
+                    >
+                      <Crosshair className="w-3.5 h-3.5" />
+                      {telemetry.weaponDrawn ? 'Holster [S+H]' : 'Sidearm [S+H]'}
                     </button>
 
                     <button
@@ -683,7 +782,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                     })}
                   </div>
                   <div className="text-[9px] tracking-[0.11em] uppercase text-slate-300/75 text-center">
-                    H Hide/Show Panels &nbsp;·&nbsp; A Autopilot &nbsp;·&nbsp; ← / → (Q / E) Rudder &nbsp;·&nbsp; W / X Telegraph &nbsp;·&nbsp; I / J / K / L Walk Deck &nbsp;·&nbsp; S Switch Deck &nbsp;·&nbsp; Drag Look
+                    H Panels &nbsp;·&nbsp; W/A/S/D Walk Ship &nbsp;·&nbsp; S+H Draw Weapon &nbsp;·&nbsp; Click Shoot &nbsp;·&nbsp; T Autopilot &nbsp;·&nbsp; ←/→ (Q/E) Rudder &nbsp;·&nbsp; Z/X Telegraph &nbsp;·&nbsp; V Switch Deck &nbsp;·&nbsp; Drag Look
                   </div>
                 </div>
               </div>

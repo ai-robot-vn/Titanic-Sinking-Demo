@@ -55,6 +55,7 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   lastEventText: null,
   autopilotEnabled: false,
   bowPanicActive: false,
+  weaponDrawn: false,
   endlessMode: false,
   isMuted: false,
 };
@@ -93,7 +94,10 @@ export default function App() {
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-[#050b14]">
       {/* Isolated WebGL Mount Container — React UI updates never tear down or re-render the canvas */}
-      <div ref={canvasMountRef} className="absolute inset-0 w-full h-full" />
+      <div
+        ref={canvasMountRef}
+        className={`absolute inset-0 w-full h-full ${telemetry.weaponDrawn ? 'cursor-crosshair' : ''}`}
+      />
 
       {/* Brief Crimson Impact Vignette on Collision */}
       {damageFlash > 0.01 && (
@@ -121,6 +125,7 @@ export default function App() {
           onSelectTelegraph={(idx) => engineRef.current?.setTelegraphIndex(idx)}
           onSetRudder={(deg) => engineRef.current?.setManualRudder(deg)}
           onToggleAutopilot={() => engineRef.current?.toggleAutopilot()}
+          onToggleWeapon={() => engineRef.current?.toggleWeaponDrawn()}
           onTriggerSearchlight={() => engineRef.current?.triggerSearchlight()}
           onToggleCamera={() => engineRef.current?.toggleCameraMode()}
           onFocusSpot={(spotId) => engineRef.current?.focusVesselSpot(spotId)}
